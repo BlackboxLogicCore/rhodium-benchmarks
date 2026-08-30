@@ -1,0 +1,102 @@
+name: Canonical Public Proof
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "canonical/**"
+      - ".gitattributes"
+      - ".github/workflows/canonical-public-proof.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-public-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout without text normalization
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Three consecutive proof checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          P="canonical/RHODIUM-CANONICAL-20260830T170440Z"
+          EXPECTED="B5B9B67506DFF0BFA7D63337E98695F5729D21D35147E7717E0868A57545C4F0"
+
+          required=(
+            RHODIUM-PUBLIC-ATTESTATION.txt
+            RHODIUM-PUBLIC-ATTESTATION.txt.sig
+            allowed-signers-attestation.txt
+            MANIFEST.sha256
+            MANIFEST.sha256.sig
+            allowed-signers.txt
+            PACKAGE.sha256
+            PACKAGE.sha256.sig
+          )
+
+          for f in "${required[@]}"; do
+            test -f "$P/$f" || { echo "MISSING=$f"; exit 10; }
+          done
+
+          if find "$P" -type f -printf '%f\n' | grep -Eiq '(private.?key|owner.?root|password|passwort|credential|token|secret)'; then
+            echo "PUBLIC_SECRET_NAME_SCAN=FAIL"
+            exit 11
+          fi
+          echo "PUBLIC_SECRET_NAME_SCAN=PASS"
+
+          for run in 1 2 3; do
+            echo "========== RUN_$run =========="
+
+            ACTUAL="$(sha256sum "$P/RHODIUM-PUBLIC-ATTESTATION.txt" | awk '{print toupper($1)}')"
+            test "$ACTUAL" = "$EXPECTED" || { echo "RUN_${run}_ATTESTATION_HASH=FAIL actual=$ACTUAL"; exit 20; }
+            echo "RUN_${run}_ATTESTATION_HASH=PASS"
+
+            ssh-keygen -Y verify \
+              -f "$P/allowed-signers-attestation.txt" \
+              -I rhodium-release \
+              -n rhodium-public-attestation \
+              -s "$P/RHODIUM-PUBLIC-ATTESTATION.txt.sig" \
+              < "$P/RHODIUM-PUBLIC-ATTESTATION.txt"
+            echo "RUN_${run}_ATTESTATION_SIGNATURE=PASS"
+
+            ssh-keygen -Y verify \
+              -f "$P/allowed-signers.txt" \
+              -I rhodium-release \
+              -n rhodium-release \
+              -s "$P/MANIFEST.sha256.sig" \
+              < "$P/MANIFEST.sha256"
+            echo "RUN_${run}_MANIFEST_SIGNATURE=PASS"
+
+            ssh-keygen -Y verify \
+              -f "$P/allowed-signers.txt" \
+              -I rhodium-release \
+              -n rhodium-package \
+              -s "$P/PACKAGE.sha256.sig" \
+              < "$P/PACKAGE.sha256"
+            echo "RUN_${run}_PACKAGE_HASH_SIGNATURE=PASS"
+
+            T="$(mktemp)"
+            cp "$P/RHODIUM-PUBLIC-ATTESTATION.txt" "$T"
+            printf '\nTAMPER_TEST=CHANGED\n' >> "$T"
+            if ssh-keygen -Y verify \
+              -f "$P/allowed-signers-attestation.txt" \
+              -I rhodium-release \
+              -n rhodium-public-attestation \
+              -s "$P/RHODIUM-PUBLIC-ATTESTATION.txt.sig" \
+              < "$T"; then
+              echo "RUN_${run}_TAMPER_REJECTION=FAIL"
+              rm -f "$T"
+              exit 30
+            fi
+            rm -f "$T"
+            echo "RUN_${run}_TAMPER_REJECTION=PASS"
+            echo "RUN_${run}=PASS"
+          done
+
+          echo "THREE_CONSECUTIVE_RUNS=PASS_PASS_PASS"
+          echo "GITHUB_CANONICAL_PUBLIC_PROOF=PASS"

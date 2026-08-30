@@ -1,0 +1,27 @@
+﻿RHODIUM GERMANY
+INDEPENDENT COUNTERSIGNATURE REQUEST
+
+RELEASE_ID=RHODIUM-CANONICAL-20260830T170440Z
+PUBLIC_ATTESTATION_SHA256=B5B9B67506DFF0BFA7D63337E98695F5729D21D35147E7717E0868A57545C4F0
+
+REQUEST:
+Independently verify the agreed technical scope using the supplied public artifacts and reproducible tests where available.
+
+PRIVATE_CORE_ACCESS_REQUIRED=NO
+PRIVATE_KEY_ACCESS_REQUIRED=NO
+PASSWORD_ACCESS_REQUIRED=NO
+
+A third party should only countersign statements it has independently tested or verified.
+Its countersignature must not be interpreted as validating statements outside the tested scope.
+
+REQUESTED_OUTPUT:
+- verifier identity
+- test scope
+- test date
+- tested release identifier
+- tested artifact hashes
+- pass/fail findings
+- limitations
+- independent digital signature or signed report
+
+STATUS=AWAITING_INDEPENDENT_COUNTERSIGNATURE
