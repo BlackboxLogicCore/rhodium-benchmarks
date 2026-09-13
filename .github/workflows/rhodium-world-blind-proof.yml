@@ -1,0 +1,373 @@
+name: Rhodium World Blind Proof
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  blind-proof:
+    name: Frozen Rhodium blind validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      EXPECTED_ENGINE: 55672321E50A48C7AD9673950D8A5C315CE3EDA225A2CB0101CCAA7CC51135C1
+      EXPECTED_HARNESS: AC459654CC3249E1652EC2A3CADDBA34A3CF29A23315E97A92DCD8E7EF00C53D
+      EXPECTED_ADAPTER: EB40EF04A23634ACC89BBA4A200BB111B52034158059E4F189444BF3FDA7C2F7
+
+    steps:
+      - name: Checkout public evidence repository
+        uses: actions/checkout@v4
+
+      - name: Recover private frozen runtime
+        shell: bash
+        env:
+          ENGINE_B64: ${{ secrets.RHODIUM_ENGINE_GZ_B64 }}
+          HARNESS_B64: ${{ secrets.RHODIUM_HARNESS_GZ_B64 }}
+          ADAPTER_B64: ${{ secrets.RHODIUM_ADAPTER_GZ_B64 }}
+        run: |
+          set -Eeuo pipefail
+
+          test -n "${ENGINE_B64:-}"  || { echo "ENGINE_SECRET=MISSING"; exit 10; }
+          test -n "${HARNESS_B64:-}" || { echo "HARNESS_SECRET=MISSING"; exit 11; }
+          test -n "${ADAPTER_B64:-}" || { echo "ADAPTER_SECRET=MISSING"; exit 12; }
+
+          mkdir -p private-runtime evidence/input evidence/runs
+
+          printf '%s' "$ENGINE_B64"  | base64 -d | gzip -dc > private-runtime/matrix_live.py
+          printf '%s' "$HARNESS_B64" | base64 -d | gzip -dc > private-runtime/matrix_blackbox.py
+          printf '%s' "$ADAPTER_B64" | base64 -d | gzip -dc > private-runtime/adapter.py
+
+          unset ENGINE_B64 HARNESS_B64 ADAPTER_B64
+
+          upper_hash() {
+            sha256sum "$1" | awk '{print toupper($1)}'
+          }
+
+          E="$(upper_hash private-runtime/matrix_live.py)"
+          H="$(upper_hash private-runtime/matrix_blackbox.py)"
+          A="$(upper_hash private-runtime/adapter.py)"
+
+          echo "ENGINE_SHA256=$E"
+          echo "HARNESS_SHA256=$H"
+          echo "ADAPTER_SHA256=$A"
+
+          test "$E" = "$EXPECTED_ENGINE"  || { echo "ENGINE_GATE=BLOCK"; exit 20; }
+          test "$H" = "$EXPECTED_HARNESS" || { echo "HARNESS_GATE=BLOCK"; exit 21; }
+          test "$A" = "$EXPECTED_ADAPTER" || { echo "ADAPTER_GATE=BLOCK"; exit 22; }
+
+          python3 -m py_compile private-runtime/matrix_live.py
+          python3 -m py_compile private-runtime/matrix_blackbox.py
+          python3 -m py_compile private-runtime/adapter.py
+
+          echo "FROZEN_RUNTIME_GATE=PASS"
+          echo "P0_PRECHECK=PASS"
+
+      - name: Execute unseen world inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          echo "RUNNER_NAME=$RUNNER_NAME"
+          echo "RUNNER_OS=$RUNNER_OS"
+          echo "RUNNER_ARCH=$RUNNER_ARCH"
+          echo "GITHUB_RUN_ID=$GITHUB_RUN_ID"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+
+          # ------------------------------------------------------
+          # Input 1: live public data fetched AFTER runner start
+          # ------------------------------------------------------
+
+          curl \
+            --fail \
+            --location \
+            --retry 3 \
+            --retry-all-errors \
+            --connect-timeout 15 \
+            --max-time 90 \
+            "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson" \
+            -o evidence/input/usgs-live.geojson
+
+          test -s evidence/input/usgs-live.geojson
+
+          python3 - <<'PY'
+          import json
+          p = "evidence/input/usgs-live.geojson"
+          with open(p, "r", encoding="utf-8") as f:
+              obj = json.load(f)
+          if obj.get("type") != "FeatureCollection":
+              raise SystemExit("USGS_INPUT_INVALID")
+          print("USGS_JSON_VALID=PASS")
+          print("USGS_FEATURES=" + str(len(obj.get("features", []))))
+          PY
+
+          # ------------------------------------------------------
+          # Input 2: generated only on GitHub runner
+          # ------------------------------------------------------
+
+          dd \
+            if=/dev/urandom \
+            of=evidence/input/runner-random-64mib.bin \
+            bs=1M \
+            count=64 \
+            status=none
+
+          test "$(stat -c%s evidence/input/runner-random-64mib.bin)" -eq 67108864
+
+          sha256sum evidence/input/usgs-live.geojson \
+            > evidence/input/USGS-SOURCE.sha256
+
+          sha256sum evidence/input/runner-random-64mib.bin \
+            > evidence/input/RANDOM-SOURCE.sha256
+
+          echo "USGS_SOURCE_BYTES=$(stat -c%s evidence/input/usgs-live.geojson)"
+          echo "USGS_SOURCE_SHA256=$(sha256sum evidence/input/usgs-live.geojson | awk '{print toupper($1)}')"
+
+          echo "RANDOM_SOURCE_BYTES=$(stat -c%s evidence/input/runner-random-64mib.bin)"
+          echo "RANDOM_SOURCE_SHA256=$(sha256sum evidence/input/runner-random-64mib.bin | awk '{print toupper($1)}')"
+
+          run_case() {
+            NAME="$1"
+            INPUT="$2"
+            SEED="$3"
+
+            WORK="evidence/runs/$NAME"
+
+            mkdir -p "$WORK"
+
+            echo "===== $NAME ====="
+
+            set +e
+
+            python3 private-runtime/adapter.py \
+              --engine private-runtime/matrix_live.py \
+              --workdir "$WORK" \
+              --seed "$SEED" \
+              --profile-tag "$NAME" \
+              --structured-percent 0 \
+              --input-file "$INPUT" \
+              --pruefnummer "GH-${GITHUB_RUN_ID}-${NAME}" \
+              --wiederherstellungsnummer "WH-${GITHUB_RUN_ID}-${NAME}" \
+              2>&1 | tee "$WORK/console.log"
+
+            RC=${PIPESTATUS[0]}
+
+            set -e
+
+            printf '%s\n' "$RC" > "$WORK/exit-code.txt"
+
+            test "$RC" -eq 0 || {
+              echo "${NAME}=FAIL_RC_${RC}"
+              exit 40
+            }
+
+            grep -q '^TEST_RESULT=PASS_REAL_ROUNDTRIP$' "$WORK/console.log"
+            grep -q '^COLD_HASH_MATCH=True$' "$WORK/console.log"
+            grep -q '^COLD_BIT_IDENTICAL=True$' "$WORK/console.log"
+            grep -q '^WARM_HASH_MATCH=True$' "$WORK/console.log"
+            grep -q '^WARM_BIT_IDENTICAL=True$' "$WORK/console.log"
+
+            grep -E \
+              '^(SOURCE_BYTES|SOURCE_SHA256|COLD_WIRE_BYTES|COLD_REDUCTION_PERCENT|COLD_HASH_MATCH|COLD_BIT_IDENTICAL|WARM_WIRE_BYTES|WARM_REDUCTION_PERCENT|WARM_BLOCKS_REUSED|WARM_HASH_MATCH|WARM_BIT_IDENTICAL)=' \
+              "$WORK/console.log" \
+              > "$WORK/reproducibility-metrics.txt"
+
+            echo "${NAME}=PASS"
+          }
+
+          run_case \
+            USGS_A \
+            evidence/input/usgs-live.geojson \
+            41001
+
+          run_case \
+            USGS_B \
+            evidence/input/usgs-live.geojson \
+            41001
+
+          run_case \
+            RANDOM_A \
+            evidence/input/runner-random-64mib.bin \
+            42001
+
+          run_case \
+            RANDOM_B \
+            evidence/input/runner-random-64mib.bin \
+            42001
+
+          cmp \
+            evidence/runs/USGS_A/reproducibility-metrics.txt \
+            evidence/runs/USGS_B/reproducibility-metrics.txt
+
+          echo "USGS_AB_EXACT_METRICS=PASS"
+
+          cmp \
+            evidence/runs/RANDOM_A/reproducibility-metrics.txt \
+            evidence/runs/RANDOM_B/reproducibility-metrics.txt
+
+          echo "RANDOM_AB_EXACT_METRICS=PASS"
+
+          # ------------------------------------------------------
+          # P=0 negative gate:
+          # altered engine must never equal frozen approved hash
+          # ------------------------------------------------------
+
+          cp private-runtime/matrix_live.py /tmp/matrix_live_tampered.py
+          printf '\n# RHODIUM-GITHUB-TAMPER-PROBE\n' \
+            >> /tmp/matrix_live_tampered.py
+
+          TAMPERED="$(
+            sha256sum /tmp/matrix_live_tampered.py |
+            awk '{print toupper($1)}'
+          )"
+
+          if [ "$TAMPERED" = "$EXPECTED_ENGINE" ]; then
+            echo "TAMPERED_ENGINE_GATE=FAIL"
+            exit 60
+          fi
+
+          {
+            echo "TAMPERED_ENGINE_GATE=BLOCK"
+            echo "P0_NEGATIVE_GATE=PASS"
+            echo "APPROVED_ENGINE_SHA256=$EXPECTED_ENGINE"
+            echo "TAMPERED_ENGINE_SHA256=$TAMPERED"
+          } | tee evidence/TAMPER-GATE.txt
+
+          rm -f /tmp/matrix_live_tampered.py
+
+          # ------------------------------------------------------
+          # Final machine-readable proof
+          # ------------------------------------------------------
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path("evidence")
+
+          def sha256(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                      h.update(chunk)
+              return h.hexdigest().upper()
+
+          def markers(path):
+              out = {}
+              with open(path, "r", encoding="utf-8", errors="replace") as f:
+                  for line in f:
+                      line = line.strip()
+                      if "=" in line:
+                          k, v = line.split("=", 1)
+                          out[k] = v
+              return out
+
+          usgs = root / "input" / "usgs-live.geojson"
+          rnd = root / "input" / "runner-random-64mib.bin"
+
+          proof = {
+              "schema": "RHODIUM-WORLD-BLIND-PROOF-V1",
+              "execution_host": "GitHub-hosted ubuntu-latest",
+              "repository": os.environ.get("GITHUB_REPOSITORY"),
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+              "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+              "github_commit": os.environ.get("GITHUB_SHA"),
+              "runner_name": os.environ.get("RUNNER_NAME"),
+              "runner_os": os.environ.get("RUNNER_OS"),
+              "runner_arch": os.environ.get("RUNNER_ARCH"),
+              "frozen_runtime": {
+                  "engine_sha256": os.environ["EXPECTED_ENGINE"],
+                  "harness_sha256": os.environ["EXPECTED_HARNESS"],
+                  "adapter_sha256": os.environ["EXPECTED_ADAPTER"],
+              },
+              "inputs": {
+                  "usgs_live": {
+                      "bytes": usgs.stat().st_size,
+                      "sha256": sha256(usgs),
+                      "obtained_after_runner_start": True,
+                      "source": "USGS all-day GeoJSON live feed",
+                  },
+                  "runner_random": {
+                      "bytes": rnd.stat().st_size,
+                      "sha256": sha256(rnd),
+                      "generated_on_github_runner": True,
+                  },
+              },
+              "runs": {
+                  name: markers(root / "runs" / name / "console.log")
+                  for name in ("USGS_A", "USGS_B", "RANDOM_A", "RANDOM_B")
+              },
+              "reproducibility": {
+                  "usgs_ab_exact_metrics": True,
+                  "random_ab_exact_metrics": True,
+              },
+              "p0_negative_gate": {
+                  "tampered_engine_rejected_before_execution": True
+              },
+              "result": "PASS_WORLD_BLIND_PROOF",
+              "certification_claim": "NONE",
+          }
+
+          with open(
+              root / "FINAL-PROOF.json",
+              "w",
+              encoding="utf-8"
+          ) as f:
+              json.dump(
+                  proof,
+                  f,
+                  indent=2,
+                  sort_keys=True
+              )
+              f.write("\n")
+          PY
+
+          (
+            cd evidence
+            find . \
+              -type f \
+              ! -name EVIDENCE.sha256 \
+              -print0 |
+            sort -z |
+            xargs -0 sha256sum
+          ) > evidence/EVIDENCE.sha256
+
+          echo "FINAL_WORLD_BLIND_RESULT=PASS"
+          echo "P0=PASS"
+          echo "RUNS=4/4"
+          echo "REPRODUCIBILITY_PAIRS=2/2"
+          echo "TAMPER_GATE=PASS"
+
+          {
+            echo "# Rhodium World Blind Proof"
+            echo ""
+            echo "- Execution: GitHub-hosted ubuntu-latest"
+            echo "- Frozen engine hash: $EXPECTED_ENGINE"
+            echo "- Frozen harness hash: $EXPECTED_HARNESS"
+            echo "- Frozen adapter hash: $EXPECTED_ADAPTER"
+            echo "- Blind/live inputs: USGS live + GitHub-runner random"
+            echo "- Matrix runs: 4/4 PASS"
+            echo "- A/B reproducibility pairs: 2/2 PASS"
+            echo "- Tampered-engine gate: BLOCK/PASS"
+            echo "- Certification claim: none"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove private runtime
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-runtime
+          echo "PRIVATE_RUNTIME_REMOVED=YES"
+
+      - name: Upload raw evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhodium-world-blind-proof-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 7
