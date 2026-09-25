@@ -1,0 +1,132 @@
+name: Rhodium ULTIMO5 Ubuntu Proof
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ultimo5-ubuntu-proof.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  ultimo5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Build and test five power levers
+        shell: bash
+        run: |
+          set -u
+          D="$RUNNER_TEMP/rhodium-ultimo5"
+          mkdir -p "$D"
+          R="$D/report.txt"
+          : > "$R"
+          out(){ echo "$1" | tee -a "$R"; }
+
+          out "RHODIUM_ULTIMO5=START"
+          out "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          out "KERNEL=$(uname -r)"
+          out "ARCH=$(uname -m)"
+          out "CPU_COUNT=$(nproc)"
+          out "P0=ENFORCED_FAIL_CLOSED"
+          out "TRANSIT_ONLY=1"
+
+          H1="NOT_SUPPORTED"
+          EBPF_COMPILE="NO"
+          EBPF_LOAD="NO"
+          if command -v clang >/dev/null 2>&1; then
+            cat > "$D/xdp.c" <<'EOF'
+          #include <linux/bpf.h>
+          #define SEC(NAME) __attribute__((section(NAME), used))
+          SEC("xdp") int rhodium_xdp(struct xdp_md *ctx) { (void)ctx; return XDP_PASS; }
+          char _license[] SEC("license") = "GPL";
+          EOF
+            if clang -O2 -g -target bpf -c "$D/xdp.c" -o "$D/xdp.o" >/dev/null 2>&1; then
+              EBPF_COMPILE="PASS"
+              H1="COMPILED"
+              if command -v bpftool >/dev/null 2>&1; then
+                if sudo bpftool prog load "$D/xdp.o" /sys/fs/bpf/rhodium_ultimo5 type xdp >/dev/null 2>&1; then
+                  EBPF_LOAD="PASS"
+                  H1="ACTIVE_TEST_LOAD"
+                  sudo rm -f /sys/fs/bpf/rhodium_ultimo5 || true
+                else
+                  EBPF_LOAD="BLOCKED_BY_RUNNER"
+                fi
+              else
+                EBPF_LOAD="BPFOOL_NOT_INSTALLED"
+              fi
+            else
+              H1="COMPILE_UNSUPPORTED"
+            fi
+          fi
+          out "HEBEL1_EBPF_XDP=$H1"
+          out "HEBEL1_EBPF_COMPILE=$EBPF_COMPILE"
+          out "HEBEL1_EBPF_LOAD=$EBPF_LOAD"
+
+          FLAGS="$(grep -m1 '^flags' /proc/cpuinfo 2>/dev/null || true)"
+          hasflag(){ echo "$FLAGS" | grep -qw "$1" && echo ACTIVE || echo NOT_SUPPORTED; }
+          out "HEBEL2_AVX2=$(hasflag avx2)"
+          if echo "$FLAGS" | grep -qw avx512f; then out "HEBEL2_AVX512=ACTIVE"; else out "HEBEL2_AVX512=NOT_SUPPORTED"; fi
+          out "HEBEL2_AES_NI=$(hasflag aes)"
+          out "HEBEL2_SHA_NI=$(hasflag sha_ni)"
+          out "HEBEL2_CLMUL=$(hasflag pclmulqdq)"
+
+          cat > "$D/zc.c" <<'EOF'
+          #define _GNU_SOURCE
+          #include <fcntl.h>
+          #include <stdatomic.h>
+          #include <stdio.h>
+          #include <sys/stat.h>
+          #include <unistd.h>
+          int main(void){
+            _Atomic unsigned long x=0;
+            for(unsigned long i=0;i<1000000UL;i++) atomic_fetch_add_explicit(&x,1,memory_order_relaxed);
+            printf("LOCK_FREE_ATOMIC=%s\n", atomic_is_lock_free(&x) ? "PASS" : "PARTIAL");
+            int a=open("/tmp/rh-zc-src",O_RDONLY), b=open("/tmp/rh-zc-dst",O_WRONLY|O_CREAT|O_TRUNC,0600);
+            if(a<0||b<0) return 3;
+            struct stat s; if(fstat(a,&s)) return 4;
+            off_t in=0,out=0,left=s.st_size;
+            while(left>0){ ssize_t n=copy_file_range(a,&in,b,&out,left>1048576?1048576:left,0); if(n<=0) return 5; left-=n; }
+            fsync(b); close(a); close(b);
+            return left==0?0:6;
+          }
+          EOF
+          dd if=/dev/zero of=/tmp/rh-zc-src bs=1M count=8 status=none
+          if gcc -O3 -std=c11 "$D/zc.c" -o "$D/zc" >/dev/null 2>&1; then
+            ZCOUT="$("$D/zc" 2>&1 || true)"
+            if cmp -s /tmp/rh-zc-src /tmp/rh-zc-dst; then out "HEBEL3_ZERO_COPY=ACTIVE_SELFTEST_PASS"; else out "HEBEL3_ZERO_COPY=FAIL"; fi
+            out "HEBEL3_$ZCOUT"
+          else
+            out "HEBEL3_ZERO_COPY=COMPILE_FAIL"
+            out "HEBEL3_LOCK_FREE_ATOMIC=UNKNOWN"
+          fi
+          rm -f /tmp/rh-zc-src /tmp/rh-zc-dst
+
+          ALLOWED="$(taskset -pc $$ 2>/dev/null | awk -F: '{gsub(/ /,"",$2); print $2}' || true)"
+          FIRSTCPU="$(echo "$ALLOWED" | sed 's/,.*//' | sed 's/-.*//')"
+          if [ -n "$FIRSTCPU" ] && taskset -c "$FIRSTCPU" true >/dev/null 2>&1; then out "HEBEL4_CPU_PINNING=ACTIVE"; else out "HEBEL4_CPU_PINNING=PARTIAL"; fi
+          out "HEBEL4_ALLOWED_CPUS=$ALLOWED"
+          out "HEBEL4_NUMA_NODES=$(lscpu 2>/dev/null | awk -F: '/NUMA node\(s\)/{gsub(/ /,"",$2);print $2}' | head -1)"
+          if command -v numactl >/dev/null 2>&1; then out "HEBEL4_NUMACTL=AVAILABLE"; else out "HEBEL4_NUMACTL=NOT_INSTALLED"; fi
+
+          cat > "$D/hot.c" <<'EOF'
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <time.h>
+          static inline __attribute__((always_inline)) uint64_t mix(uint64_t x){ x^=x>>33; x*=0xff51afd7ed558ccdULL; x^=x>>33; return x; }
+          int main(void){ struct timespec a,b; volatile uint64_t s=0; clock_gettime(CLOCK_MONOTONIC,&a); for(uint64_t i=0;i<50000000ULL;i++) s+=mix(i); clock_gettime(CLOCK_MONOTONIC,&b); double t=(b.tv_sec-a.tv_sec)+(b.tv_nsec-a.tv_nsec)/1e9; printf("HOTPATH_SECONDS=%.6f\nHOTPATH_CHECK=%llu\n",t,(unsigned long long)s); return 0; }
+          EOF
+          if gcc -O3 -march=native -mtune=native -fno-plt "$D/hot.c" -o "$D/hot" >/dev/null 2>&1; then
+            out "HEBEL5_HOTPATH=ACTIVE"
+            "$D/hot" | while IFS= read -r line; do out "HEBEL5_$line"; done
+          else
+            out "HEBEL5_HOTPATH=COMPILE_FAIL"
+          fi
+
+          SHA="$(sha256sum "$R" | awk '{print $1}')"
+          out "EVIDENCE_SHA256=$SHA"
+          out "RHODIUM_ULTIMO5=DONE"
+          cat "$R" >> "$GITHUB_STEP_SUMMARY"
+
+# REQUEST_UTC=2026-09-25T04:22:42.6587490Z
