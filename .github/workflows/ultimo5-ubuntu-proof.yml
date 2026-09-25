@@ -35,41 +35,47 @@ jobs:
           H1="NOT_SUPPORTED"
           EBPF_COMPILE="NO"
           EBPF_LOAD="NO"
-          CLANG="$(command -v clang-18 || command -v clang-17 || command -v clang || true)"; if [ -n "$CLANG" ]; then            cat > "$D/xdp.c" <<'EOF'
-#define SEC(NAME) __attribute__((section(NAME), used))
-typedef unsigned int __u32;
-struct xdp_md {
-    __u32 data;
-    __u32 data_end;
-    __u32 data_meta;
-    __u32 ingress_ifindex;
-    __u32 rx_queue_index;
-    __u32 egress_ifindex;
-};
-#define XDP_PASS 2
-SEC("xdp")
-int rhodium_xdp(struct xdp_md *ctx) {
-    (void)ctx;
-    return XDP_PASS;
-}
-char _license[] SEC("license") = "GPL";
-EOF
+          CLANG="$(command -v clang-18 || command -v clang-17 || command -v clang || true)"
+          H1="NOT_SUPPORTED"
+          EBPF_COMPILE="NO"
+          EBPF_LOAD="NO"
+          if [ -n "$CLANG" ]; then
+            echo "I2RlZmluZSBTRUMoTkFNRSkgX19hdHRyaWJ1dGVfXygoc2VjdGlvbihOQU1FKSwgdXNlZCkpCnR5cGVkZWYgdW5zaWduZWQgaW50IF9fdTMyOwpzdHJ1Y3QgeGRwX21kIHsKICAgIF9fdTMyIGRhdGE7CiAgICBfX3UzMiBkYXRhX2VuZDsKICAgIF9fdTMyIGRhdGFfbWV0YTsKICAgIF9fdTMyIGluZ3Jlc3NfaWZpbmRleDsKICAgIF9fdTMyIHJ4X3F1ZXVlX2luZGV4OwogICAgX191MzIgZWdyZXNzX2lmaW5kZXg7Cn07CiNkZWZpbmUgWERQX1BBU1MgMgpTRUMoInhkcCIpCmludCByaG9kaXVtX3hkcChzdHJ1Y3QgeGRwX21kICpjdHgpIHsKICAgICh2b2lkKWN0eDsKICAgIHJldHVybiBYRFBfUEFTUzsKfQpjaGFyIF9saWNlbnNlW10gU0VDKCJsaWNlbnNlIikgPSAiR1BMIjsK" | base64 -d > "$D/xdp.c"
             if "$CLANG" -O2 -g -target bpf -c "$D/xdp.c" -o "$D/xdp.o" 2>"$D/xdp-compile.err"; then
               EBPF_COMPILE="PASS"
               H1="COMPILED"
-              if ! command -v bpftool >/dev/null 2>&1; then sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq bpftool >/dev/null 2>&1 || true; fi; if command -v bpftool >/dev/null 2>&1; then
-                if sudo bpftool prog load "$D/xdp.o" /sys/fs/bpf/rhodium_ultimo5 type xdp >/dev/null 2>&1; then
-                  EBPF_LOAD="PASS"
-                  H1="ACTIVE_TEST_LOAD"
-                  sudo rm -f /sys/fs/bpf/rhodium_ultimo5 || true
+              if command -v ip >/dev/null 2>&1; then
+                A="rhxa$$"
+                B="rhxb$$"
+                if sudo ip link add "$A" type veth peer name "$B" 2>"$D/xdp-veth.err"; then
+                  sudo ip link set "$A" up
+                  sudo ip link set "$B" up
+                  if sudo ip link set dev "$A" xdp obj "$D/xdp.o" sec xdp 2>"$D/xdp-attach.err"; then
+                    if sudo ip -details link show dev "$A" | grep -q "prog/xdp"; then
+                      H1="ACTIVE_CANARY_PASS"
+                      EBPF_LOAD="PASS"
+                    else
+                      H1="ATTACH_VERIFY_FAIL"
+                      EBPF_LOAD="FAIL"
+                    fi
+                    sudo ip link set dev "$A" xdp off >/dev/null 2>&1 || true
+                  else
+                    H1="ATTACH_FAIL"
+                    EBPF_LOAD="FAIL"
+                    out "HEBEL1_ATTACH_ERROR=$(tr "\n" " " < "$D/xdp-attach.err" | head -c 1000)"
+                  fi
+                  sudo ip link del "$A" >/dev/null 2>&1 || true
                 else
-                  EBPF_LOAD="BLOCKED_BY_RUNNER"
+                  H1="VETH_CREATE_FAIL"
+                  EBPF_LOAD="FAIL"
+                  out "HEBEL1_VETH_ERROR=$(tr "\n" " " < "$D/xdp-veth.err" | head -c 1000)"
                 fi
               else
-                EBPF_LOAD="BPFOOL_NOT_INSTALLED"
+                H1="IP_TOOL_NOT_FOUND"
               fi
             else
-              H1="COMPILE_FAIL"; out "HEBEL1_COMPILE_ERROR=$(tr '\n' ' ' < "$D/xdp-compile.err" | head -c 1000)"
+              H1="COMPILE_FAIL"
+              out "HEBEL1_COMPILE_ERROR=$(tr "\n" " " < "$D/xdp-compile.err" | head -c 1000)"
             fi
           fi
           out "HEBEL1_EBPF_XDP=$H1"
