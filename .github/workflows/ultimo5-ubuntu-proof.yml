@@ -35,17 +35,29 @@ jobs:
           H1="NOT_SUPPORTED"
           EBPF_COMPILE="NO"
           EBPF_LOAD="NO"
-          CLANG="$(command -v clang-18 || command -v clang-17 || command -v clang || true)"; if [ -n "$CLANG" ]; then
-            cat > "$D/xdp.c" <<'EOF'
-          #include <linux/bpf.h>
-          #define SEC(NAME) __attribute__((section(NAME), used))
-          SEC("xdp") int rhodium_xdp(struct xdp_md *ctx) { (void)ctx; return XDP_PASS; }
-          char _license[] SEC("license") = "GPL";
-          EOF
+          CLANG="$(command -v clang-18 || command -v clang-17 || command -v clang || true)"; if [ -n "$CLANG" ]; then            cat > "$D/xdp.c" <<'EOF'
+#define SEC(NAME) __attribute__((section(NAME), used))
+typedef unsigned int __u32;
+struct xdp_md {
+    __u32 data;
+    __u32 data_end;
+    __u32 data_meta;
+    __u32 ingress_ifindex;
+    __u32 rx_queue_index;
+    __u32 egress_ifindex;
+};
+#define XDP_PASS 2
+SEC("xdp")
+int rhodium_xdp(struct xdp_md *ctx) {
+    (void)ctx;
+    return XDP_PASS;
+}
+char _license[] SEC("license") = "GPL";
+EOF
             if "$CLANG" -O2 -g -target bpf -c "$D/xdp.c" -o "$D/xdp.o" 2>"$D/xdp-compile.err"; then
               EBPF_COMPILE="PASS"
               H1="COMPILED"
-              if command -v bpftool >/dev/null 2>&1; then
+              if ! command -v bpftool >/dev/null 2>&1; then sudo apt-get update -qq >/dev/null 2>&1 && sudo apt-get install -y -qq bpftool >/dev/null 2>&1 || true; fi; if command -v bpftool >/dev/null 2>&1; then
                 if sudo bpftool prog load "$D/xdp.o" /sys/fs/bpf/rhodium_ultimo5 type xdp >/dev/null 2>&1; then
                   EBPF_LOAD="PASS"
                   H1="ACTIVE_TEST_LOAD"
@@ -132,3 +144,5 @@ jobs:
 # REQUEST_UTC=2026-09-25T04:22:42.6587490Z
 
 # HEBEL1_RETRY_UTC=2026-09-25T04:24:56.4645993Z
+
+# HEBEL1_HEADERFREE_RETRY_UTC=2026-09-25T04:26:36.9457664Z
