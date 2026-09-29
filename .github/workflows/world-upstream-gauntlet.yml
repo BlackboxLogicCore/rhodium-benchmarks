@@ -1,0 +1,300 @@
+name: Rhodium World Upstream Gauntlet
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "WORLD-BENCHMARKS.md"
+      - ".github/workflows/world-upstream-gauntlet.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  cloudflare-speedtest:
+    name: Cloudflare speedtest official engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cloudflare/speedtest
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Cloudflare" | tee evidence/cloudflare-speedtest.txt
+          echo "UPSTREAM_REPO=cloudflare/speedtest" | tee -a evidence/cloudflare-speedtest.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/cloudflare-speedtest.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Official build and unit tests
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.4.0 --activate
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm test:unit
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=build+test:unit" | tee -a evidence/cloudflare-speedtest.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/cloudflare-speedtest.txt
+          echo "LIVE_INTERNET_COMPARISON=NOT_CLAIMED_BY_THIS_JOB" | tee -a evidence/cloudflare-speedtest.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-speedtest-upstream
+          path: evidence/cloudflare-speedtest.txt
+
+  meta-zstd:
+    name: Meta zstd official checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: facebook/zstd
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Meta" | tee evidence/meta-zstd.txt
+          echo "UPSTREAM_REPO=facebook/zstd" | tee -a evidence/meta-zstd.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/meta-zstd.txt
+      - name: Official build and check
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          make -j2 zstd
+          make check
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=make zstd + make check" | tee -a evidence/meta-zstd.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/meta-zstd.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-zstd-upstream
+          path: evidence/meta-zstd.txt
+
+  google-brotli:
+    name: Google Brotli official tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: google/brotli
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Google" | tee evidence/google-brotli.txt
+          echo "UPSTREAM_REPO=google/brotli" | tee -a evidence/google-brotli.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/google-brotli.txt
+      - name: Official CMake build and tests
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
+          cmake --build out -j2
+          ctest --test-dir out --output-on-failure
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=CMake Release build + CTest" | tee -a evidence/google-brotli.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/google-brotli.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-brotli-upstream
+          path: evidence/google-brotli.txt
+
+  cloudflare-zlib:
+    name: Cloudflare zlib official build
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cloudflare/zlib
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Cloudflare" | tee evidence/cloudflare-zlib.txt
+          echo "UPSTREAM_REPO=cloudflare/zlib" | tee -a evidence/cloudflare-zlib.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/cloudflare-zlib.txt
+      - name: Official CMake build and tests
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
+          cmake --build out -j2
+          ctest --test-dir out --output-on-failure
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=Cloudflare fork CMake build + CTest" | tee -a evidence/cloudflare-zlib.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/cloudflare-zlib.txt
+          echo "UPSTREAM_NOTE=Repository currently marks this fork deprecated" | tee -a evidence/cloudflare-zlib.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-zlib-upstream
+          path: evidence/cloudflare-zlib.txt
+
+  aws-s2n-netbench:
+    name: AWS s2n-netbench official quickstart
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aws/s2n-netbench
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=AWS" | tee evidence/aws-s2n-netbench.txt
+          echo "UPSTREAM_REPO=aws/s2n-netbench" | tee -a evidence/aws-s2n-netbench.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/aws-s2n-netbench.txt
+      - name: Official README quickstart
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          chmod +x scripts/netbench-run.sh
+          ./scripts/netbench-run.sh
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=scripts/netbench-run.sh" | tee -a evidence/aws-s2n-netbench.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/aws-s2n-netbench.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-s2n-netbench-upstream
+          path: evidence/aws-s2n-netbench.txt
+
+  microsoft-ntttcp:
+    name: Microsoft NTTTCP official build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: microsoft/ntttcp-for-linux
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Microsoft" | tee evidence/microsoft-ntttcp.txt
+          echo "UPSTREAM_REPO=microsoft/ntttcp-for-linux" | tee -a evidence/microsoft-ntttcp.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/microsoft-ntttcp.txt
+      - name: Official build
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          make -C src -j2
+          ./src/ntttcp -h
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=make -C src + CLI smoke" | tee -a evidence/microsoft-ntttcp.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/microsoft-ntttcp.txt
+          echo "REAL_TWO_ENDPOINT_THROUGHPUT=INFRASTRUCTURE_REQUIRED" | tee -a evidence/microsoft-ntttcp.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: microsoft-ntttcp-upstream
+          path: evidence/microsoft-ntttcp.txt
+
+  google-fleetbench:
+    name: Google Fleetbench compression
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: google/fleetbench
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Google" | tee evidence/google-fleetbench.txt
+          echo "UPSTREAM_REPO=google/fleetbench" | tee -a evidence/google-fleetbench.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/google-fleetbench.txt
+      - name: Install Bazelisk
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/bazel https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+          sudo chmod +x /usr/local/bin/bazel
+          bazel --version
+      - name: Official optimized compression benchmark
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        env:
+          GLIBC_TUNABLES: glibc.pthread.rseq=0
+        run: |
+          bazel run --config=clang --config=opt --config=haswell fleetbench/compression:compression_benchmark -- --benchmark_counters_tabular=true
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCOPE=Fleetbench compression benchmark optimized path" | tee -a evidence/google-fleetbench.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/google-fleetbench.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-fleetbench-upstream
+          path: evidence/google-fleetbench.txt
+
+  rhodium-public-proof:
+    name: Rhodium canonical public proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify canonical proof three times
+        id: test
+        continue-on-error: true
+        run: |
+          set -Eeuo pipefail
+          P="canonical/RHODIUM-CANONICAL-20260830T170440Z"
+          EXPECTED="B5B9B67506DFF0BFA7D63337E98695F5729D21D35147E7717E0868A57545C4F0"
+          for run in 1 2 3; do
+            ACTUAL="$(sha256sum "$P/RHODIUM-PUBLIC-ATTESTATION.txt" | awk '{print toupper($1)}')"
+            test "$ACTUAL" = "$EXPECTED"
+            ssh-keygen -Y verify -f "$P/allowed-signers-attestation.txt" -I rhodium-release -n rhodium-public-attestation -s "$P/RHODIUM-PUBLIC-ATTESTATION.txt.sig" < "$P/RHODIUM-PUBLIC-ATTESTATION.txt"
+          done
+      - name: Result
+        if: always()
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=Rhodium Germany" | tee evidence/rhodium-public-proof.txt
+          echo "OFFICIAL_SCOPE=canonical public proof verification x3" | tee -a evidence/rhodium-public-proof.txt
+          echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/rhodium-public-proof.txt
+          echo "PRIVATE_CORE_DISCLOSED=NO" | tee -a evidence/rhodium-public-proof.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhodium-public-proof
+          path: evidence/rhodium-public-proof.txt
