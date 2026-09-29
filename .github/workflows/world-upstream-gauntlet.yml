@@ -2,6 +2,8 @@ name: Rhodium World Upstream Gauntlet
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 15 29 9 *'
   push:
     branches: [main]
     paths:
