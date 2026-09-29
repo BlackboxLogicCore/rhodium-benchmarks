@@ -4,6 +4,8 @@ Sanitized, cryptographically verifiable Rhodium Germany evidence.
 
 No private keys, secrets, protected core logic or customer content are published here.
 
+Current public benchmark campaign: [WORLD-BENCHMARKS.md](WORLD-BENCHMARKS.md)
+
 ## Evidence policy
 
 Results in this repository are intended to remain tied to their exact test scope.
