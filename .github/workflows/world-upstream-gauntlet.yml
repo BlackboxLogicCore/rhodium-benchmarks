@@ -41,8 +41,9 @@ jobs:
           corepack enable
           corepack prepare pnpm@11.4.0 --activate
           pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
           pnpm build
-          pnpm test:unit
+          pnpm test
       - name: Result
         if: always()
         run: |
@@ -176,6 +177,13 @@ jobs:
           echo "VENDOR=AWS" | tee evidence/aws-s2n-netbench.txt
           echo "UPSTREAM_REPO=aws/s2n-netbench" | tee -a evidence/aws-s2n-netbench.txt
           echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/aws-s2n-netbench.txt
+      - name: Refresh Rust toolchain for upstream Edition 2024 dependencies
+        working-directory: upstream
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+          cargo --version
       - name: Official README quickstart
         id: test
         continue-on-error: true
@@ -257,7 +265,14 @@ jobs:
         env:
           GLIBC_TUNABLES: glibc.pthread.rseq=0
         run: |
-          bazel run --config=clang --config=opt --config=haswell fleetbench/compression:compression_benchmark -- --benchmark_counters_tabular=true
+          for attempt in 1 2 3; do
+            echo "FLEETBENCH_ATTEMPT=$attempt"
+            if bazel run --config=clang --config=opt --config=haswell fleetbench/compression:compression_benchmark -- --benchmark_counters_tabular=true; then
+              exit 0
+            fi
+            sleep 10
+          done
+          exit 1
       - name: Result
         if: always()
         run: |
