@@ -47,7 +47,7 @@ jobs:
       - name: Result
         if: always()
         run: |
-          echo "OFFICIAL_SCOPE=build+test:unit" | tee -a evidence/cloudflare-speedtest.txt
+          echo "OFFICIAL_SCOPE=build + full upstream pnpm test suite" | tee -a evidence/cloudflare-speedtest.txt
           echo "UPSTREAM_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/cloudflare-speedtest.txt
           echo "LIVE_INTERNET_COMPARISON=NOT_CLAIMED_BY_THIS_JOB" | tee -a evidence/cloudflare-speedtest.txt
       - if: always()
@@ -201,6 +201,50 @@ jobs:
         with:
           name: aws-s2n-netbench-upstream
           path: evidence/aws-s2n-netbench.txt
+
+
+  aws-s2n-netbench-compat:
+    name: AWS s2n-netbench compatibility rerun
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: aws/s2n-netbench
+          path: upstream
+          fetch-depth: 1
+      - name: Record upstream
+        run: |
+          mkdir -p evidence
+          echo "VENDOR=AWS" | tee evidence/aws-s2n-netbench-compat.txt
+          echo "UPSTREAM_REPO=aws/s2n-netbench" | tee -a evidence/aws-s2n-netbench-compat.txt
+          echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/aws-s2n-netbench-compat.txt
+          echo "ENVIRONMENT_ADAPTATION=upstream pins Rust 1.77.0; compatibility lane overrides to stable because current resolved dependency requires Edition 2024" | tee -a evidence/aws-s2n-netbench-compat.txt
+      - name: Compatibility toolchain
+        working-directory: upstream
+        run: |
+          rustup update stable
+          rustup override set stable
+          rustc --version
+          cargo --version
+      - name: Run official script under compatibility toolchain
+        id: test
+        continue-on-error: true
+        working-directory: upstream
+        run: |
+          chmod +x scripts/netbench-run.sh
+          ./scripts/netbench-run.sh
+      - name: Result
+        if: always()
+        run: |
+          echo "OFFICIAL_SCRIPT=scripts/netbench-run.sh" | tee -a evidence/aws-s2n-netbench-compat.txt
+          echo "COMPAT_TEST_OUTCOME=${{ steps.test.outcome }}" | tee -a evidence/aws-s2n-netbench-compat.txt
+          echo "PUBLIC_CLAIM=compatibility rerun only; not identical to upstream pinned toolchain" | tee -a evidence/aws-s2n-netbench-compat.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aws-s2n-netbench-compat
+          path: evidence/aws-s2n-netbench-compat.txt
 
   microsoft-ntttcp:
     name: Microsoft NTTTCP official build
