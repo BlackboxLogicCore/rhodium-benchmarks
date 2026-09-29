@@ -35,7 +35,6 @@ jobs:
           node-version: "22"
       - name: Official build and unit tests
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           corepack enable
@@ -74,7 +73,6 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/meta-zstd.txt
       - name: Official build and check
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           make -j2 zstd
@@ -108,7 +106,6 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/google-brotli.txt
       - name: Official CMake build and tests
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
@@ -143,7 +140,6 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/cloudflare-zlib.txt
       - name: Official CMake build and tests
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           cmake -S . -B out -DCMAKE_BUILD_TYPE=Release
@@ -186,7 +182,6 @@ jobs:
           cargo --version
       - name: Official README quickstart
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           chmod +x scripts/netbench-run.sh
@@ -229,7 +224,6 @@ jobs:
           cargo --version
       - name: Run official script under compatibility toolchain
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           chmod +x scripts/netbench-run.sh
@@ -264,7 +258,6 @@ jobs:
           echo "UPSTREAM_COMMIT=$(git -C upstream rev-parse HEAD)" | tee -a evidence/microsoft-ntttcp.txt
       - name: Official build
         id: test
-        continue-on-error: true
         working-directory: upstream
         run: |
           make -C src -j2
@@ -304,7 +297,6 @@ jobs:
           bazel --version
       - name: Official optimized compression benchmark
         id: test
-        continue-on-error: true
         working-directory: upstream
         env:
           GLIBC_TUNABLES: glibc.pthread.rseq=0
@@ -336,7 +328,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify canonical proof three times
         id: test
-        continue-on-error: true
         run: |
           set -Eeuo pipefail
           P="canonical/RHODIUM-CANONICAL-20260830T170440Z"
