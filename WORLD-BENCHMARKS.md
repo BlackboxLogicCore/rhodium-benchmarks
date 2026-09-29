@@ -4,7 +4,8 @@
 **Public evidence:** this repository  
 **Website:** https://rhodium-germany.de  
 **Bidding table:** https://rhodium-germany.de/pages/team-rhodium-germany-partner-2026  
-**Round-1 deadline:** 30 September 2026, 05:00 CEST
+**Round-1 deadline:** 30 September 2026, 05:00 CEST  
+**Live batch:** 2026-09-29 / official upstream parallel run
 
 Rhodium Germany is running a public upstream benchmark campaign against well-known open-source technology stacks. The rule is simple: use the vendor's own public repository and documented test path first, record the exact upstream commit, keep raw evidence, and only publish a direct win when the measured scope is actually comparable.
 
