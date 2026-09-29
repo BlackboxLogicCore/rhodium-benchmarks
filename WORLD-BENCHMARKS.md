@@ -50,7 +50,7 @@ The purpose of the upstream gauntlet is not to manufacture a marketing “win.�
 | Google | google/fleetbench | **PASS** — optimized compression benchmark path | Official Google workload-style compression benchmark executes on the GitHub runner |
 | Microsoft | microsoft/ntttcp-for-linux | **PASS** — official build + CLI smoke | Binary executes; real two-endpoint throughput needs a second controlled endpoint |
 | AWS | aws/s2n-netbench | **BLOCKED in official pinned environment** — upstream pins Rust 1.77.0 while current resolved dependency requires Edition 2024 | This is a toolchain/dependency compatibility block, not a Rhodium performance result |
-| AWS compatibility lane | aws/s2n-netbench | **RUNNING** — same official script under a clearly disclosed current stable Rust override | Separate compatibility rerun; not claimed as identical to the pinned upstream environment |
+| AWS compatibility lane | aws/s2n-netbench | **BLOCKED** — current stable Rust passes the Edition-2024 gate, but current resolved `s2n-quic-core` / `insta` APIs do not compile together | Separate compatibility rerun; confirms a second upstream dependency compatibility block, not a Rhodium performance result |
 | Fastly | fastly/kvstore-benchmarks | **INFRASTRUCTURE_REQUIRED** | Meaningful run requires Fastly infrastructure / credentials |
 | NVIDIA | NVIDIA/nvbench | **HARDWARE_REQUIRED** | Meaningful run requires a suitable NVIDIA GPU runner |
 | Intel | intel/compute-benchmarks | **HARDWARE_REQUIRED** | Meaningful run requires compatible accelerator/runtime |
