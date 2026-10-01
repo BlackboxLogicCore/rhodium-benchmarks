@@ -1,0 +1,124 @@
+name: Hutter Record Attack - Exact Size Gate
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/hutter-record-attack.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  size-gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Build current record compressor and repack only the executable
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CURRENT_TOTAL=100424672
+          CLAIM_TARGET=99420424
+          REQUIRED_SHRINK=$((CURRENT_TOTAL-CLAIM_TARGET))
+          UPSTREAM_COMMIT=83f2603f3f7751da5f429fd32669807eb8510494
+
+          echo "HUTTER_RECORD_ATTACK=START"
+          echo "CURRENT_TOTAL_BYTES=$CURRENT_TOTAL"
+          echo "CLAIM_TARGET_BYTES=$CLAIM_TARGET"
+          echo "REQUIRED_SHRINK_BYTES=$REQUIRED_SHRINK"
+          echo "BOX_CHANGED=NO"
+          echo "ALGORITHM_CHANGED=NO"
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          # Build dependencies only. This is outside the measured Hutter compression path.
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl make curl gnupg lsb-release software-properties-common
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17
+          rm llvm.sh
+
+          ./build_and_construct_comp.sh
+
+          BASELINE_COMP_BYTES=$(stat -c%s run/cmix)
+
+          # run/cmix_orig is the UPX-packed executable prefix before the fixed
+          # dictionary/order/transformer payload is appended. Repack ONLY that
+          # prefix; model, coder, dictionary and archive algorithm remain identical.
+          cp run/cmix_orig run/cmix_opt_prefix
+          upx-ucl -d run/cmix_opt_prefix
+
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_opt_prefix
+
+          upx-ucl --best --lzma run/cmix_opt_prefix
+
+          cat             run/cmix_opt_prefix             run/comp_dict             run/comp_order             run/comp_tfweights             run/header.dat             > run/cmix_rhodium_candidate
+
+          chmod +x run/cmix_rhodium_candidate
+
+          CANDIDATE_COMP_BYTES=$(stat -c%s run/cmix_rhodium_candidate)
+          SHRINK_BYTES=$((BASELINE_COMP_BYTES-CANDIDATE_COMP_BYTES))
+          PROJECTED_TOTAL=$((CURRENT_TOTAL-SHRINK_BYTES))
+
+          echo "BASELINE_COMP_BYTES=$BASELINE_COMP_BYTES"
+          echo "CANDIDATE_COMP_BYTES=$CANDIDATE_COMP_BYTES"
+          echo "COMPRESSOR_SHRINK_BYTES=$SHRINK_BYTES"
+          echo "PROJECTED_TOTAL_BYTES=$PROJECTED_TOTAL"
+
+          # Minimal execution proof: same executable logic, only packaging changed.
+          mkdir -p smoke-base smoke-candidate
+          cp run/cmix_orig smoke-base/cmix
+          cp run/cmix_rhodium_candidate smoke-candidate/cmix
+
+          cp dictionary/english.dic smoke-base/input
+          cp dictionary/english.dic smoke-candidate/input
+
+          (
+            cd smoke-base
+            ./cmix -c input output >/dev/null
+          )
+
+          (
+            cd smoke-candidate
+            ./cmix -c input output >/dev/null
+          )
+
+          BASE_HASH=$(sha256sum smoke-base/output | awk '{print $1}')
+          CANDIDATE_HASH=$(sha256sum smoke-candidate/output | awk '{print $1}')
+
+          echo "BASELINE_SMOKE_SHA256=$BASE_HASH"
+          echo "CANDIDATE_SMOKE_SHA256=$CANDIDATE_HASH"
+
+          if [ "$BASE_HASH" != "$CANDIDATE_HASH" ]; then
+            echo "PACKAGING_EQUIVALENCE=FAIL"
+            exit 1
+          fi
+
+          echo "PACKAGING_EQUIVALENCE=PASS"
+
+          if [ "$PROJECTED_TOTAL" -le "$CLAIM_TARGET" ]; then
+            echo "SIZE_ONLY_RECORD_GATE=PASS"
+            echo "FULL_ENWIK9_REQUIRED=YES"
+          else
+            echo "SIZE_ONLY_RECORD_GATE=FAIL"
+            echo "MISSING_BYTES=$((PROJECTED_TOTAL-CLAIM_TARGET))"
+            echo "FULL_ENWIK9_REQUIRED=NO"
+          fi
+
+          {
+            echo "## Hutter exact size gate"
+            echo
+            echo "- Current official total: $CURRENT_TOTAL bytes"
+            echo "- 1% claim target: <= $CLAIM_TARGET bytes"
+            echo "- Baseline compressor: $BASELINE_COMP_BYTES bytes"
+            echo "- Repacked compressor: $CANDIDATE_COMP_BYTES bytes"
+            echo "- Shrink: $SHRINK_BYTES bytes"
+            echo "- Projected total if archive remains identical: $PROJECTED_TOTAL bytes"
+            echo "- Packaging equivalence: PASS"
+          } >> "$GITHUB_STEP_SUMMARY"
