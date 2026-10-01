@@ -1,3 +1,4 @@
+# Trigger-only commit for fresh GitHub Actions run; executable logic unchanged.
 # ==============================================================================
 # RHODIUM MATRIX 0-BYTE ULTIMO BENCHMARK (LIVE PRODUCTION BUILD)
 # ==============================================================================
