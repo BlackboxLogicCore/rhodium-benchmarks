@@ -1,0 +1,186 @@
+name: Atomic Seed Live Ready
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Explicit owner start gate"
+        required: true
+        default: "NO"
+        type: choice
+        options:
+          - "NO"
+          - "YES"
+      payload_bytes:
+        description: "Raw seed payload size"
+        required: true
+        default: "8"
+        type: choice
+        options:
+          - "8"
+          - "16"
+          - "42"
+
+permissions:
+  contents: read
+
+jobs:
+  atomic-live:
+    if: ${{ inputs.confirm == 'YES' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Produce deterministic source and raw seed payload
+        shell: bash
+        env:
+          PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import hashlib, os, pathlib, struct, concurrent.futures
+
+          n = int(os.environ["PAYLOAD_BYTES"])
+          if n not in (8,16,42):
+              raise SystemExit("INVALID_PAYLOAD_BYTES")
+
+          # Fixed raw seed bytes only. No wrapper/header/decoder in payload.
+          base = hashlib.sha256(b"RHODIUM_ATOMIC_SEED_V1").digest()
+          seed = (base * ((n + len(base) - 1)//len(base)))[:n]
+          pathlib.Path("/tmp/atom.bin").write_bytes(seed)
+          if pathlib.Path("/tmp/atom.bin").stat().st_size != n:
+              raise SystemExit("PAYLOAD_SIZE_MISMATCH")
+
+          # Deterministic target-side expansion function. This is deliberately
+          # external to the payload and therefore must be accounted as
+          # preinstalled decoder/state in any benchmark that requires it.
+          total = 1024 * 1024
+          workers = min(8, os.cpu_count() or 2)
+          chunks = workers
+
+          def make_chunk(i):
+              start = (total * i)//chunks
+              end = (total * (i+1))//chunks
+              out = bytearray()
+              ctr = start // 32
+              while len(out) < (end-start):
+                  h = hashlib.sha256(seed + struct.pack("<Q", ctr)).digest()
+                  out.extend(h)
+                  ctr += 1
+              return bytes(out[:end-start])
+
+          with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+              parts = list(ex.map(make_chunk, range(chunks)))
+
+          src = b"".join(parts)
+          pathlib.Path("/tmp/source.bin").write_bytes(src)
+          pathlib.Path("/tmp/source.sha256").write_text(hashlib.sha256(src).hexdigest())
+          pathlib.Path("/tmp/source.bytes").write_text(str(len(src)))
+          pathlib.Path("/tmp/workers").write_text(str(workers))
+
+          print(f"PAYLOAD_BYTES={n}")
+          print(f"PRODUCER_WORKERS={workers}")
+          print(f"SOURCE_BYTES={len(src)}")
+          print("PRODUCER=PASS")
+          PY
+
+      - name: Transfer raw seed only
+        uses: actions/upload-artifact@v4
+        with:
+          name: atom-only
+          path: /tmp/atom.bin
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Publish verification metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "SOURCE_SHA256=$(cat /tmp/source.sha256)"
+            echo "SOURCE_BYTES=$(cat /tmp/source.bytes)"
+            echo "WORKERS=$(cat /tmp/workers)"
+          } > /tmp/meta.env
+
+      - name: Upload verifier metadata separately
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifier-metadata
+          path: /tmp/meta.env
+          if-no-files-found: error
+          retention-days: 1
+
+  receiver:
+    if: ${{ inputs.confirm == 'YES' }}
+    needs: atomic-live
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Receive raw seed only
+        uses: actions/download-artifact@v4
+        with:
+          name: atom-only
+          path: inbound
+
+      - name: Receive external verification metadata
+        uses: actions/download-artifact@v4
+        with:
+          name: verifier-metadata
+          path: verify
+
+      - name: Expand seed with target-side parallel workers and verify
+        shell: bash
+        env:
+          PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
+        run: |
+          set -euo pipefail
+          source verify/meta.env
+
+          test "$(find inbound -maxdepth 1 -type f | wc -l)" -eq 1
+          test -f inbound/atom.bin
+          test "$(stat -c%s inbound/atom.bin)" = "$PAYLOAD_BYTES"
+
+          START_NS="$(date +%s%N)"
+          python3 - <<'PY'
+          import hashlib, os, pathlib, struct, concurrent.futures
+
+          seed = pathlib.Path("inbound/atom.bin").read_bytes()
+          total = int(os.environ["SOURCE_BYTES"])
+          workers = int(os.environ["WORKERS"])
+          chunks = workers
+
+          def make_chunk(i):
+              start = (total * i)//chunks
+              end = (total * (i+1))//chunks
+              out = bytearray()
+              ctr = start // 32
+              while len(out) < (end-start):
+                  h = hashlib.sha256(seed + struct.pack("<Q", ctr)).digest()
+                  out.extend(h)
+                  ctr += 1
+              return bytes(out[:end-start])
+
+          with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as ex:
+              parts = list(ex.map(make_chunk, range(chunks)))
+
+          restored = b"".join(parts)
+          pathlib.Path("restored.bin").write_bytes(restored)
+          actual = hashlib.sha256(restored).hexdigest()
+          expected = os.environ["SOURCE_SHA256"].lower()
+
+          if len(restored) != total:
+              raise SystemExit("RESTORE_SIZE_FAIL")
+          if actual != expected:
+              raise SystemExit("RESTORE_HASH_FAIL")
+
+          print("STATUS=PASS_ATOMIC_SEED_EXPANSION")
+          print(f"PAYLOAD_BYTES={len(seed)}")
+          print(f"RECEIVER_WORKERS={workers}")
+          print(f"RESTORE_BYTES={len(restored)}")
+          print(f"RESTORE_SHA256={actual}")
+          print("BIT_IDENTICAL=PASS")
+          PY
+          END_NS="$(date +%s%N)"
+          echo "RESTORE_MS=$(( (END_NS-START_NS)/1000000 ))"
