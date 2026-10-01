@@ -17,7 +17,7 @@ env:
 
 jobs:
   screen:
-    name: transform-mask-\${{ matrix.mask }}
+    name: transform-mask-${{ matrix.mask }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
     strategy:
@@ -47,7 +47,7 @@ jobs:
           sed -i "s/^SEED=\"923\"$/SEED=\"$ELITE_SEED\"/" build_and_construct_comp.sh
           sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$ELITE_LIMIT\"/" build_and_construct_comp.sh
 
-          MASK="\${{ matrix.mask }}" python3 - <<'PY'
+          MASK="${{ matrix.mask }}" python3 - <<'PY'
           import os
           from pathlib import Path
 
@@ -110,7 +110,7 @@ jobs:
           TOTAL_BYTES="$((COMP_BYTES + PPMD_BYTES))"
           PPMD_SECONDS="$(cat /tmp/ppmd.seconds)"
 
-          MASK="\${{ matrix.mask }}" \
+          MASK="${{ matrix.mask }}" \
           COMP_BYTES="$COMP_BYTES" \
           PPMD_BYTES="$PPMD_BYTES" \
           TOTAL_BYTES="$TOTAL_BYTES" \
@@ -140,7 +140,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: meister-candidate-\${{ matrix.mask }}
+          name: meister-candidate-${{ matrix.mask }}
           path: fx2/meister-candidate.json
           if-no-files-found: error
           retention-days: 7
@@ -151,8 +151,8 @@ jobs:
     if: always()
     runs-on: ubuntu-22.04
     outputs:
-      winner_mask: \${{ steps.pick.outputs.winner_mask }}
-      promote: \${{ steps.pick.outputs.promote }}
+      winner_mask: ${{ steps.pick.outputs.winner_mask }}
+      promote: ${{ steps.pick.outputs.promote }}
 
     steps:
       - uses: actions/download-artifact@v4
@@ -219,7 +219,7 @@ jobs:
       - name: Emit exact winner recipe
         shell: bash
         env:
-          WINNER_MASK: \${{ needs.select.outputs.winner_mask }}
+          WINNER_MASK: ${{ needs.select.outputs.winner_mask }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
