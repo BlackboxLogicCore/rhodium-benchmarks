@@ -122,3 +122,5 @@ jobs:
             echo "- Projected total if archive remains identical: $PROJECTED_TOTAL bytes"
             echo "- Packaging equivalence: PASS"
           } >> "$GITHUB_STEP_SUMMARY"
+
+# RUN_REQUEST=2026-10-01T08:00:00+02:00
