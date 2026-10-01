@@ -1,0 +1,30 @@
+name: Rhodium Matrix Hutter Prize enwik9 Benchmark
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-hutter-benchmark:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zstd wget unzip
+
+      - name: Make Benchmark Script Executable
+        run: chmod +x ./scripts/rhodium-hutter-enwik9.sh
+
+      - name: Execute Stable enwik9 Benchmark
+        run: ./scripts/rhodium-hutter-enwik9.sh
+
+      - name: Upload Proof Certificate Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhodium-hutter-result-certificate
+          path: /tmp/rhodium_hutter_box/rhodium_hutter_result.json
