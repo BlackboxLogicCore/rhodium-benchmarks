@@ -13,12 +13,19 @@ env:
   UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
 
 jobs:
-  burst:
+  candidate:
+    name: candidate-${{ matrix.seed }}-${{ matrix.limit }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        seed: [1009, 1019, 1021, 1031, 1033, 1039, 1049, 1061]
+        limit: [4000, 4200, 4600, 5200]
 
     steps:
-      - name: Launch all 32 candidates at once
+      - name: Build and verify one isolated candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -34,81 +41,77 @@ jobs:
           git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git base
           cd base
           git checkout "$UPSTREAM_COMMIT"
-          cd ..
 
-          mkdir -p work tmp results
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
 
-          run_one() {
-            seed="$1"
-            limit="$2"
-            id="${seed}-${limit}"
-            dir="$GITHUB_WORKSPACE/work/$id"
-            tmp="$GITHUB_WORKSPACE/tmp/$id"
+          ./build_and_construct_comp.sh >build.log 2>&1
+          test -f run/cmix_orig
 
-            cp -a "$GITHUB_WORKSPACE/base" "$dir"
-            mkdir -p "$tmp"
+          cp run/cmix_orig run/cmix_size_prefix
+          upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
 
-            (
-              set -euo pipefail
-              cd "$dir"
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_size_prefix
+          upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
 
-              sed -i "s/^SEED=\"923\"$/SEED=\"${seed}\"/" build_and_construct_comp.sh
-              sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"${limit}\"/" build_and_construct_comp.sh
+          cat run/cmix_size_prefix run/comp_dict run/comp_order run/comp_tfweights run/header.dat > run/cmix_size_candidate
+          chmod +x run/cmix_size_candidate
 
-              ./build_and_construct_comp.sh >"$tmp/build.log" 2>&1
+          mkdir -p ../result ../tmp
+          cp prof_input/input ../tmp/input
 
-              cp run/cmix_orig run/cmix_size_prefix
-              upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
+          ./run/cmix_size_candidate -c ../tmp/input ../tmp/archive >../tmp/compress.log 2>&1
+          ./run/cmix_size_candidate -d ../tmp/archive ../tmp/restored >../tmp/decompress.log 2>&1
 
-              STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
-              "$STRIP_BIN" --strip-all run/cmix_size_prefix
-              upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
+          SRC_HASH="$(sha256sum ../tmp/input | awk '{print $1}')"
+          DST_HASH="$(sha256sum ../tmp/restored | awk '{print $1}')"
+          test "$SRC_HASH" = "$DST_HASH"
 
-              cat                 run/cmix_size_prefix                 run/comp_dict                 run/comp_order                 run/comp_tfweights                 run/header.dat                 > run/cmix_size_candidate
-              chmod +x run/cmix_size_candidate
+          COMP_BYTES="$(stat -c%s run/cmix_size_candidate)"
+          ARCHIVE_BYTES="$(stat -c%s ../tmp/archive)"
+          TOTAL_BYTES="$((COMP_BYTES + ARCHIVE_BYTES))"
 
-              cp prof_input/input "$tmp/input"
-
-              ./run/cmix_size_candidate -c "$tmp/input" "$tmp/archive" >"$tmp/compress.log" 2>&1
-              ./run/cmix_size_candidate -d "$tmp/archive" "$tmp/restored" >"$tmp/decompress.log" 2>&1
-
-              SRC_HASH="$(sha256sum "$tmp/input" | awk '{print $1}')"
-              DST_HASH="$(sha256sum "$tmp/restored" | awk '{print $1}')"
-              test "$SRC_HASH" = "$DST_HASH"
-
-              COMP_BYTES="$(stat -c%s run/cmix_size_candidate)"
-              ARCHIVE_BYTES="$(stat -c%s "$tmp/archive")"
-              TOTAL_BYTES="$((COMP_BYTES + ARCHIVE_BYTES))"
-
-              python3 - <<PY
+          python3 - <<PY
           import json
           row = {
-            "seed": int("$seed"),
-            "update_limit": int("$limit"),
+            "seed": int("${{ matrix.seed }}"),
+            "update_limit": int("${{ matrix.limit }}"),
             "compressor_bytes": int("$COMP_BYTES"),
             "archive_bytes": int("$ARCHIVE_BYTES"),
             "net_total_bytes": int("$TOTAL_BYTES"),
-            "roundtrip": "PASS"
+            "roundtrip": "PASS",
+            "screening_input": "prof_input/input",
+            "hutter_submission_score": False
           }
-          open("$GITHUB_WORKSPACE/results/$id.json","w").write(
-              json.dumps(row, sort_keys=True) + "\\n"
+          open("../result/candidate-${{ matrix.seed }}-${{ matrix.limit }}.json","w").write(
+              json.dumps(row, sort_keys=True) + "\n"
           )
           PY
-            )
-          }
 
-          pids=()
-          for seed in 1009 1019 1021 1031 1033 1039 1049 1061; do
-            for limit in 4000 4200 4600 5200; do
-              (run_one "$seed" "$limit" || echo "FAILED=${seed}-${limit}") &
-              pids+=("$!")
-            done
-          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candidate-${{ matrix.seed }}-${{ matrix.limit }}
+          path: result/*.json
+          if-no-files-found: error
+          retention-days: 7
 
-          for pid in "${pids[@]}"; do
-            wait "$pid" || true
-          done
+  reduce:
+    name: Pick smallest verified archive
+    needs: candidate
+    if: ${{ always() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: candidate-*
+          path: results
+          merge-multiple: true
 
+      - name: Select winner by archive bytes only
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
           import glob, json, os
 
@@ -125,32 +128,33 @@ jobs:
               raise SystemExit("NO_VALID_CANDIDATES")
 
           rows.sort(key=lambda x: (
-              x["net_total_bytes"],
               x["archive_bytes"],
+              x["net_total_bytes"],
               x["compressor_bytes"]
           ))
 
           result = {
               "verified_candidates": len(rows),
               "best": rows[0],
-              "selection_metric": "NET_TOTAL_BYTES_ONLY",
-              "runtime_used_for_selection": False
+              "selection_metric": "ARCHIVE_BYTES_ONLY",
+              "runtime_used_for_selection": False,
+              "screening_only": True,
+              "requires_full_enwik9_submission_test": True
           }
 
           open("hutter-32-burst-result.json","w").write(
               json.dumps(result, indent=2, sort_keys=True) + "\n"
           )
-
           print(json.dumps(result, indent=2, sort_keys=True))
 
+          b = rows[0]
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              b = rows[0]
-              f.write("## Hutter 32-way burst\n\n")
+              f.write("## Hutter 32-way screening burst\n\n")
               f.write(f"Verified: {len(rows)}/32\n\n")
               f.write(f"Best seed={b['seed']} limit={b['update_limit']}\n\n")
               f.write(f"Archive={b['archive_bytes']} bytes\n\n")
-              f.write(f"Compressor={b['compressor_bytes']} bytes\n\n")
-              f.write(f"Net total={b['net_total_bytes']} bytes\n")
+              f.write("Selection metric: ARCHIVE_BYTES_ONLY\n\n")
+              f.write("This is a screening run on prof_input/input, not an official enwik9 submission score.\n")
           PY
 
       - uses: actions/upload-artifact@v4
