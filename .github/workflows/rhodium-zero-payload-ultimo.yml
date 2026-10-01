@@ -18,6 +18,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Run exact PowerShell benchmark
+      - name: Run exact Ubuntu benchmark
         shell: pwsh
         run: pwsh -NoProfile -File .\scripts\rhodium-zero-payload-ultimo.ps1
