@@ -25,10 +25,9 @@ $InitialSize = (Get-Item $TriggerFile).Length
 $InitialHash = (Get-FileHash -Path $TriggerFile -Algorithm SHA256).Hash
 # 2. Präzisions-Zeitmessung & Swarm-Zündung (1.024 Agenten)
 $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-[System.Threading.Tasks.Parallel]::For(0, $WORKER_COUNT, [System.Action[int]]{
-    param($AgentId)
-    $null = $AgentId * 1
-})
+1..$WORKER_COUNT | ForEach-Object -Parallel {
+    $null = $_ * 1
+} -ThrottleLimit $WORKER_COUNT
 # Ziel-Rekonstruktion im Empfänger-Container
 $TargetFile = "$WorkDir\reconstructed_target.bin"
 [System.IO.File]::Copy($TriggerFile, $TargetFile, $true)
