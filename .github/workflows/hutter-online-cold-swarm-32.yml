@@ -1,0 +1,320 @@
+name: Hutter Online-Model Cold Swarm 32
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hutter-online-cold-swarm-32.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  ENWIK9_SHA1: 2996e86fb978f93cca8f566cc56998923e7fe581
+  TARGET_BYTES: "99420425"
+
+jobs:
+  search:
+    name: online-${{ matrix.seed }}-${{ matrix.limit }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        seed: [1009, 1019, 1021, 1031, 1033, 1039, 1049, 1061]
+        limit: [3200, 3600, 4000, 4400]
+
+    steps:
+      - name: Build deterministic self-learning no-weight candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common time
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          runner=Path("src/runner.cpp")
+          s=runner.read_text()
+          old='extraction, ".tfweights"'
+          n=s.count(old)
+          if n != 2:
+              raise SystemExit(f"RUNNER_PATCH_COUNT={n}")
+          runner.write_text(s.replace(old, 'extraction, ""'))
+
+          build=Path("build_and_construct_comp.sh")
+          s=build.read_text()
+          old='cp $ROOT/models/6m-q4-fp32.tfwc2 ./comp_tfweights'
+          if old not in s:
+              raise SystemExit("WEIGHT_PATCH_TARGET_MISSING")
+          build.write_text(s.replace(old, ': > ./comp_tfweights'))
+
+          print("ONLINE_MODEL_PATCH=PASS")
+          PY
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          test "$(stat -c%s run/comp_tfweights)" = "0"
+
+          mkdir -p /tmp/sample
+          cp prof_input/input /tmp/sample/input
+
+          /usr/bin/time -f "%e" -o /tmp/sample/csec             ./run/cmix -c /tmp/sample/input /tmp/sample/archive >/tmp/sample/c.log 2>&1
+          /usr/bin/time -f "%e" -o /tmp/sample/dsec             ./run/cmix -d /tmp/sample/archive /tmp/sample/restored >/tmp/sample/d.log 2>&1
+
+          test "$(sha256sum /tmp/sample/input | awk '{print $1}')" =                "$(sha256sum /tmp/sample/restored | awk '{print $1}')"
+
+          COMP="$(stat -c%s run/cmix)"
+          ARC="$(stat -c%s /tmp/sample/archive)"
+          TOTAL="$((COMP+ARC))"
+          CSEC="$(cat /tmp/sample/csec)"
+          DSEC="$(cat /tmp/sample/dsec)"
+
+          python3 - <<PY
+          import json
+          r={
+            "seed":int("${{ matrix.seed }}"),
+            "update_limit":int("${{ matrix.limit }}"),
+            "compressor_bytes":int("$COMP"),
+            "sample_archive_bytes":int("$ARC"),
+            "sample_total_bytes":int("$TOTAL"),
+            "compress_seconds":float("$CSEC"),
+            "decompress_seconds":float("$DSEC"),
+            "fixed_model_weight_bytes":0,
+            "model_mode":"DETERMINISTIC_ONLINE_SELF_LEARNING",
+            "roundtrip":"PASS"
+          }
+          open("online-candidate.json","w").write(json.dumps(r,sort_keys=True)+"\n")
+          print(json.dumps(r,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: online-${{ matrix.seed }}-${{ matrix.limit }}
+          path: fx2/online-candidate.json
+          retention-days: 7
+
+  select:
+    needs: search
+    if: always()
+    runs-on: ubuntu-22.04
+    outputs:
+      seed: ${{ steps.pick.outputs.seed }}
+      limit: ${{ steps.pick.outputs.limit }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: online-*
+          path: results
+          merge-multiple: false
+
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob,json
+
+          rows=[]
+          for p in glob.glob("results/**/online-candidate.json",recursive=True):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS" and x.get("fixed_model_weight_bytes")==0:
+                      rows.append(x)
+              except Exception:
+                  pass
+
+          if not rows:
+              raise SystemExit("NO_VALID_ONLINE_CANDIDATES")
+
+          rows.sort(key=lambda x:(
+              x["sample_total_bytes"],
+              x["compress_seconds"]+x["decompress_seconds"],
+              x["compressor_bytes"]
+          ))
+          e=rows[0]
+
+          print("seed="+str(e["seed"]))
+          print("limit="+str(e["update_limit"]))
+
+          open("online-winner.json","w").write(
+              json.dumps({"verified":len(rows),"winner":e},indent=2,sort_keys=True)+"\n"
+          )
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: online-model-winner
+          path: online-winner.json
+          retention-days: 7
+
+  fresh-cold-final:
+    needs: select
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Build selected no-weight standalone candidate
+        shell: bash
+        env:
+          WIN_SEED: ${{ needs.select.outputs.seed }}
+          WIN_LIMIT: ${{ needs.select.outputs.limit }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl unzip gnupg lsb-release software-properties-common time
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i "s/^SEED=\"923\"$/SEED=\"$WIN_SEED\"/" build_and_construct_comp.sh
+          sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$WIN_LIMIT\"/" build_and_construct_comp.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          runner=Path("src/runner.cpp")
+          s=runner.read_text()
+          old='extraction, ".tfweights"'
+          n=s.count(old)
+          if n != 2:
+              raise SystemExit(f"RUNNER_PATCH_COUNT={n}")
+          runner.write_text(s.replace(old, 'extraction, ""'))
+
+          build=Path("build_and_construct_comp.sh")
+          s=build.read_text()
+          old='cp $ROOT/models/6m-q4-fp32.tfwc2 ./comp_tfweights'
+          if old not in s:
+              raise SystemExit("WEIGHT_PATCH_TARGET_MISSING")
+          build.write_text(s.replace(old, ': > ./comp_tfweights'))
+          PY
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+          test "$(stat -c%s run/comp_tfweights)" = "0"
+
+      - name: Fresh download official enwik9 once
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/online-cold
+          mkdir -p /tmp/online-cold/source /tmp/online-cold/encode /tmp/online-cold/restore
+
+          curl --fail --location --retry 3             --connect-timeout 20 --max-time 900             --silent --show-error             https://mattmahoney.net/dc/enwik9.zip             --output /tmp/online-cold/enwik9.zip
+
+          unzip -q /tmp/online-cold/enwik9.zip -d /tmp/online-cold/source
+          rm /tmp/online-cold/enwik9.zip
+
+          test "$(stat -c%s /tmp/online-cold/source/enwik9)" = "1000000000"
+          test "$(sha1sum /tmp/online-cold/source/enwik9 | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          echo "FRESH_ENWIK9=PASS"
+
+      - name: Produce one standalone cold package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp fx2/run/cmix /tmp/online-cold/encode/cmix
+          cp /tmp/online-cold/source/enwik9 /tmp/online-cold/encode/enwik9
+          chmod +x /tmp/online-cold/encode/cmix
+
+          (
+            cd /tmp/online-cold/encode
+            /usr/bin/time -f "%e" -o /tmp/online-cold/csec               ./cmix -e enwik9 enwik9.comp >/tmp/online-cold/c.log 2>&1
+            test -f archive9
+          )
+
+          SCORE="$(stat -c%s /tmp/online-cold/encode/archive9)"
+          echo "$SCORE" > /tmp/online-cold/score
+
+          cp /tmp/online-cold/encode/archive9 /tmp/online-cold/restore/archive9
+          chmod +x /tmp/online-cold/restore/archive9
+
+          rm -rf /tmp/online-cold/source /tmp/online-cold/encode
+          rm -rf fx2
+
+          test "$(find /tmp/online-cold/restore -maxdepth 1 -type f | wc -l)" -eq 1
+          echo "NAKED_RECEIVER=PASS"
+
+      - name: Restore from archive9 only
+        shell: bash
+        env:
+          WIN_SEED: ${{ needs.select.outputs.seed }}
+          WIN_LIMIT: ${{ needs.select.outputs.limit }}
+        run: |
+          set -euo pipefail
+
+          (
+            cd /tmp/online-cold/restore
+            /usr/bin/time -f "%e" -o /tmp/online-cold/dsec               ./archive9 >/tmp/online-cold/d.log 2>&1
+          )
+
+          test -f /tmp/online-cold/restore/enwik9_uncompressed
+          test "$(stat -c%s /tmp/online-cold/restore/enwik9_uncompressed)" = "1000000000"
+          test "$(sha1sum /tmp/online-cold/restore/enwik9_uncompressed | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          SCORE="$(cat /tmp/online-cold/score)"
+          CSEC="$(cat /tmp/online-cold/csec)"
+          DSEC="$(cat /tmp/online-cold/dsec)"
+
+          mkdir -p evidence
+          python3 - <<PY
+          import json
+
+          score=int("$SCORE")
+          target=int("$TARGET_BYTES")
+
+          out={
+            "status":"PASS_COLD_ONLINE_MODEL_STANDALONE",
+            "development_workers":32,
+            "fixed_model_weight_bytes":0,
+            "model_mode":"DETERMINISTIC_ONLINE_SELF_LEARNING",
+            "fresh_final_download":True,
+            "preexisting_receiver_state":False,
+            "restore_input_files":["archive9"],
+            "source_bytes":1000000000,
+            "source_sha1":"$ENWIK9_SHA1",
+            "winner_seed":int("$WIN_SEED"),
+            "winner_update_limit":int("$WIN_LIMIT"),
+            "archive9_bytes":score,
+            "compress_seconds":float("$CSEC"),
+            "decompress_seconds":float("$DSEC"),
+            "bit_identical":True,
+            "target_bytes":target,
+            "target_reached":score <= target
+          }
+
+          open("evidence/hutter-online-cold-final.json","w").write(
+              json.dumps(out,indent=2,sort_keys=True)+"\n"
+          )
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-online-cold-final-${{ github.run_id }}
+          path: evidence/hutter-online-cold-final.json
+          retention-days: 7
