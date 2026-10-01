@@ -2,6 +2,9 @@ name: Rhodium original enwik9 remote test
 run-name: enwik9 - ${{ inputs.request_id }}
 
 on:
+  push:
+    paths:
+      - ".github/workflows/enwik9-remote-rhodium.yml"
   workflow_dispatch:
     inputs:
       request_id:
