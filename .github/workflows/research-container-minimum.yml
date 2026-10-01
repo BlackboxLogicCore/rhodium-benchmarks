@@ -1,0 +1,95 @@
+name: Rhodium small native container test
+
+on:
+  push:
+    branches:
+      - 'research/container-minimum-*'
+    paths:
+      - '.github/workflows/research-container-minimum.yml'
+      - 'scripts/research_container_minimum.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-container-roundtrip:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Prepare unchanged native runtime and small benchmark input
+        env:
+          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 || secrets.RG_ENGINE_GZ_B64 }}
+          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 || secrets.RG_HARNESS_GZ_B64 }}
+          RH_ADAPTER: ${{ secrets.RHODIUM_ENWIK9_ADAPTER_GZ_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os
+          from pathlib import Path
+          from scripts.research_container_minimum import EXPECTED
+          runtime = Path('research-private-runtime')
+          work = Path('research-private-case')
+          evidence = Path('evidence')
+          runtime.mkdir()
+          work.mkdir()
+          evidence.mkdir(exist_ok=True)
+          available = {}
+          for variable, name in [('RH_ENGINE', 'matrix_live.py'), ('RH_HARNESS', 'matrix_blackbox.py'), ('RH_ADAPTER', 'adapter.py')]:
+              encoded = os.environ.get(variable, '').lstrip('\ufeff').strip()
+              available[name] = bool(encoded)
+              if not encoded:
+                  continue
+              raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+              if hashlib.sha256(raw).hexdigest() != EXPECTED[name]:
+                  raise SystemExit('NATIVE_RUNTIME_HASH_MISMATCH=' + name)
+              (runtime / name).write_bytes(raw)
+              (runtime / name).chmod(0o400)
+          source = Path('reports/RHODIUM-CANONICAL-20260830T170440Z-GITHUB-ROUNDTRIP.txt').read_bytes()
+          (work / 'source.bin').write_bytes(source + b'\nNEW-SENDER-NONCE=' + os.urandom(32))
+          (evidence / 'native-runtime-availability.json').write_text(json.dumps(available, sort_keys=True) + '\n')
+          print('NATIVE_RUNTIME_AVAILABILITY=' + json.dumps(available, sort_keys=True))
+          print('SOURCE_BYTES=' + str((work / 'source.bin').stat().st_size))
+          PY
+
+      - name: Execute the original Rhodium adapter in an isolated container
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! test -f research-private-runtime/matrix_live.py || ! test -f research-private-runtime/matrix_blackbox.py || ! test -f research-private-runtime/adapter.py; then
+            python3 scripts/research_container_minimum.py --runtime research-private-runtime --source research-private-case/source.bin --case research-private-case/case --report evidence/small-container-result.json
+            exit 1
+          fi
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            -e PYTHONDONTWRITEBYTECODE=1 -e GITHUB_RUN_ID \
+            -v "$PWD/research-private-runtime:/runtime:ro" \
+            -v "$PWD/scripts/research_container_minimum.py:/probe.py:ro" \
+            -v "$PWD/research-private-case:/work:rw" \
+            -v "$PWD/evidence:/evidence:rw" \
+            python:3.10-slim \
+            python3 /probe.py --runtime /runtime --source /work/source.bin --case /work/case --report /evidence/small-container-result.json
+
+      - name: Retain measurements only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: small-native-container-${{ github.run_id }}
+          path: |
+            evidence/small-container-result.json
+            evidence/small-container-result.json.sha256
+            evidence/native-runtime-availability.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Remove temporary native runtime and working files
+        if: always()
+        run: rm -rf research-private-runtime research-private-case
