@@ -1,0 +1,294 @@
+name: Hutter Cold Swarm 32 Fresh Final
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hutter-cold-swarm-32.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  ENWIK9_SHA1: 2996e86fb978f93cca8f566cc56998923e7fe581
+  TARGET_BYTES: "99420425"
+
+jobs:
+  swarm:
+    name: swarm-${{ matrix.seed }}-${{ matrix.limit }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        seed: [1009, 1019, 1021, 1031, 1033, 1039, 1049, 1061]
+        limit: [3800, 4000, 4200, 4600]
+
+    steps:
+      - name: Build one candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common time
+
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          cp run/cmix_orig run/cmix_swarm
+          upx-ucl -d run/cmix_swarm >/dev/null 2>&1
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_swarm
+          upx-ucl --best --lzma run/cmix_swarm >/dev/null 2>&1
+
+          cat             run/cmix_swarm             run/comp_dict             run/comp_order             run/comp_tfweights             run/header.dat             > run/cmix_candidate
+          chmod +x run/cmix_candidate
+
+          mkdir -p /tmp/s
+          cp prof_input/input /tmp/s/input
+
+          /usr/bin/time -f "%e" -o /tmp/s/csec             ./run/cmix_candidate -c /tmp/s/input /tmp/s/archive >/tmp/s/c.log 2>&1
+
+          /usr/bin/time -f "%e" -o /tmp/s/dsec             ./run/cmix_candidate -d /tmp/s/archive /tmp/s/restored >/tmp/s/d.log 2>&1
+
+          test "$(sha256sum /tmp/s/input | awk '{print $1}')" =                "$(sha256sum /tmp/s/restored | awk '{print $1}')"
+
+          COMP="$(stat -c%s run/cmix_candidate)"
+          ARC="$(stat -c%s /tmp/s/archive)"
+          TOTAL="$((COMP+ARC))"
+          CSEC="$(cat /tmp/s/csec)"
+          DSEC="$(cat /tmp/s/dsec)"
+
+          python3 - <<PY
+          import json
+          r={
+            "seed":int("${{ matrix.seed }}"),
+            "update_limit":int("${{ matrix.limit }}"),
+            "compressor_bytes":int("$COMP"),
+            "sample_archive_bytes":int("$ARC"),
+            "sample_total_bytes":int("$TOTAL"),
+            "compress_seconds":float("$CSEC"),
+            "decompress_seconds":float("$DSEC"),
+            "roundtrip":"PASS"
+          }
+          open("candidate.json","w").write(json.dumps(r,sort_keys=True)+"\n")
+          print(json.dumps(r,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: swarm-${{ matrix.seed }}-${{ matrix.limit }}
+          path: fx2/candidate.json
+          retention-days: 7
+
+  select:
+    needs: swarm
+    if: always()
+    runs-on: ubuntu-22.04
+    outputs:
+      seed: ${{ steps.pick.outputs.seed }}
+      limit: ${{ steps.pick.outputs.limit }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: swarm-*
+          path: results
+          merge-multiple: false
+
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob, json
+
+          rows=[]
+          for p in glob.glob("results/**/candidate.json", recursive=True):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS":
+                      rows.append(x)
+              except Exception:
+                  pass
+
+          if not rows:
+              raise SystemExit("NO_SWARM_PASS")
+
+          # Size is absolute priority. Time is only an exact-size tiebreak.
+          rows.sort(key=lambda x:(
+              x["sample_total_bytes"],
+              x["compress_seconds"]+x["decompress_seconds"],
+              x["compressor_bytes"]
+          ))
+
+          e=rows[0]
+          print("seed="+str(e["seed"]))
+          print("limit="+str(e["update_limit"]))
+
+          open("swarm-winner.json","w").write(
+              json.dumps({"verified":len(rows),"winner":e},indent=2,sort_keys=True)+"\n"
+          )
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cold-swarm-winner
+          path: swarm-winner.json
+          retention-days: 7
+
+  fresh-final:
+    needs: select
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Build swarm-selected standalone decoder
+        shell: bash
+        env:
+          WIN_SEED: ${{ needs.select.outputs.seed }}
+          WIN_LIMIT: ${{ needs.select.outputs.limit }}
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl unzip gnupg lsb-release software-properties-common time
+
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i "s/^SEED=\"923\"$/SEED=\"$WIN_SEED\"/" build_and_construct_comp.sh
+          sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$WIN_LIMIT\"/" build_and_construct_comp.sh
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          cp run/cmix_orig run/cmix_cold
+          upx-ucl -d run/cmix_cold >/dev/null 2>&1
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_cold
+          upx-ucl --best --lzma run/cmix_cold >/dev/null 2>&1
+
+          cat             run/cmix_cold             run/comp_dict             run/comp_order             run/comp_tfweights             run/header.dat             > run/cmix_candidate
+          chmod +x run/cmix_candidate
+
+      - name: Fresh one-time download of official enwik9
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/cold32
+          mkdir -p /tmp/cold32/source /tmp/cold32/encode /tmp/cold32/restore
+
+          curl --fail --location --retry 3             --connect-timeout 20 --max-time 900             --silent --show-error             https://mattmahoney.net/dc/enwik9.zip             --output /tmp/cold32/enwik9.zip
+
+          unzip -q /tmp/cold32/enwik9.zip -d /tmp/cold32/source
+          rm /tmp/cold32/enwik9.zip
+
+          test "$(stat -c%s /tmp/cold32/source/enwik9)" = "1000000000"
+          test "$(sha1sum /tmp/cold32/source/enwik9 | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          echo "FRESH_ENWIK9=PASS"
+
+      - name: Pack once
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp fx2/run/cmix_candidate /tmp/cold32/encode/cmix
+          cp /tmp/cold32/source/enwik9 /tmp/cold32/encode/enwik9
+          chmod +x /tmp/cold32/encode/cmix
+
+          (
+            cd /tmp/cold32/encode
+            /usr/bin/time -f "%e" -o /tmp/cold32/csec               ./cmix -e enwik9 enwik9.comp >/tmp/cold32/c.log 2>&1
+            test -f archive9
+          )
+
+          cp /tmp/cold32/encode/archive9 /tmp/cold32/restore/archive9
+          chmod +x /tmp/cold32/restore/archive9
+
+          SCORE="$(stat -c%s /tmp/cold32/encode/archive9)"
+          echo "$SCORE" > /tmp/cold32/score
+
+          rm -rf /tmp/cold32/source /tmp/cold32/encode
+          rm -rf fx2
+
+          test "$(find /tmp/cold32/restore -maxdepth 1 -type f | wc -l)" -eq 1
+          echo "NAKED_RECEIVER=PASS"
+
+      - name: Restore using only final package
+        shell: bash
+        env:
+          WIN_SEED: ${{ needs.select.outputs.seed }}
+          WIN_LIMIT: ${{ needs.select.outputs.limit }}
+        run: |
+          set -euo pipefail
+
+          (
+            cd /tmp/cold32/restore
+            /usr/bin/time -f "%e" -o /tmp/cold32/dsec               ./archive9 >/tmp/cold32/d.log 2>&1
+          )
+
+          test -f /tmp/cold32/restore/enwik9_uncompressed
+          test "$(stat -c%s /tmp/cold32/restore/enwik9_uncompressed)" = "1000000000"
+          test "$(sha1sum /tmp/cold32/restore/enwik9_uncompressed | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          SCORE="$(cat /tmp/cold32/score)"
+          CSEC="$(cat /tmp/cold32/csec)"
+          DSEC="$(cat /tmp/cold32/dsec)"
+
+          mkdir -p evidence
+
+          python3 - <<PY
+          import json
+
+          score=int("$SCORE")
+          target=int("$TARGET_BYTES")
+
+          out={
+            "status":"PASS_COLD_SWARM32_STANDALONE",
+            "swarm_workers":32,
+            "fresh_final_download":True,
+            "preexisting_receiver_state":False,
+            "restore_input_files":["archive9"],
+            "source_bytes":1000000000,
+            "source_sha1":"$ENWIK9_SHA1",
+            "winner_seed":int("$WIN_SEED"),
+            "winner_update_limit":int("$WIN_LIMIT"),
+            "archive9_bytes":score,
+            "compress_seconds":float("$CSEC"),
+            "decompress_seconds":float("$DSEC"),
+            "bit_identical":True,
+            "target_bytes":target,
+            "target_reached":score <= target
+          }
+
+          open("evidence/hutter-cold-swarm32.json","w").write(
+              json.dumps(out,indent=2,sort_keys=True)+"\n"
+          )
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-cold-swarm32-${{ github.run_id }}
+          path: evidence/hutter-cold-swarm32.json
+          retention-days: 7
