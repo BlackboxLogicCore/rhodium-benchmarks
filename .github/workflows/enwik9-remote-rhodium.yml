@@ -1,0 +1,76 @@
+name: Rhodium original enwik9 remote test
+run-name: enwik9 - ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Unique request from the local runtime owner
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rhodium-enwik9-remote
+  cancel-in-progress: false
+
+jobs:
+  enwik9:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recover hash-pinned runtime
+        env:
+          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 }}
+          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 }}
+          RH_ADAPTER: ${{ secrets.RHODIUM_ENWIK9_ADAPTER_GZ_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          from scripts.enwik9_remote_test import EXPECTED_RUNTIME
+          root = Path("private-runtime")
+          root.mkdir(exist_ok=False)
+          for variable, name in [
+              ("RH_ENGINE", "matrix_live.py"),
+              ("RH_HARNESS", "matrix_blackbox.py"),
+              ("RH_ADAPTER", "adapter.py"),
+          ]:
+              encoded = os.environ.get(variable, "")
+              if not encoded:
+                  raise SystemExit("RUNTIME_PACKAGE_MISSING")
+              raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+              if hashlib.sha256(raw).hexdigest() != EXPECTED_RUNTIME[name]:
+                  raise SystemExit("RUNTIME_HASH_MISMATCH")
+              target = root / name
+              target.write_bytes(raw)
+              target.chmod(0o400)
+          print("FROZEN_RUNTIME_GATE=PASS")
+          PY
+
+      - name: Download and test original enwik9
+        run: python3 scripts/enwik9_remote_test.py
+
+      - name: Remove runtime and working data
+        if: always()
+        run: rm -rf private-runtime private-work
+
+      - name: Keep measurements only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: enwik9-measurements-${{ github.run_id }}
+          path: |
+            evidence/enwik9-result.json
+            evidence/SHA256SUMS
+          if-no-files-found: ignore
+          retention-days: 7
