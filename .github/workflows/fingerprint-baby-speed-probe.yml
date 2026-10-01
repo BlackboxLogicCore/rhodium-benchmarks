@@ -1,0 +1,351 @@
+name: Fingerprint Baby Speed Probe
+
+on:
+  push:
+    paths:
+      - ".github/workflows/fingerprint-baby-speed-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  RESTORE_TARGET_MS: "13000"
+
+jobs:
+  speed-probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      source_sha256: ${{ steps.meta.outputs.source_sha256 }}
+      source_bytes: ${{ steps.meta.outputs.source_bytes }}
+      fingerprint_bytes: ${{ steps.meta.outputs.fingerprint_bytes }}
+      workers: ${{ steps.meta.outputs.workers }}
+      local_restore_ms: ${{ steps.meta.outputs.local_restore_ms }}
+
+    steps:
+      - name: Fast build without PGO or transformer payload
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          # Fast research build: no PGO training pass and no appended transformer weights.
+          make CC=clang++ cmix -j"$(nproc)" >/tmp/build.log 2>&1
+          strip -s cmix
+          cp cmix /tmp/baby_decoder
+          chmod +x /tmp/baby_decoder
+
+          echo "DECODER_BYTES=$(stat -c%s /tmp/baby_decoder)"
+
+      - name: Create one-file fingerprints with parallel receiver workers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp fx2/prof_input/input /tmp/source.bin
+          SOURCE_BYTES="$(stat -c%s /tmp/source.bin)"
+          SOURCE_SHA256="$(sha256sum /tmp/source.bin | awk '{print $1}')"
+          echo "$SOURCE_SHA256" > /tmp/source.sha256
+
+          cat > /tmp/fp_stub.c <<'C'
+          #define _GNU_SOURCE
+          #include <fcntl.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <sys/wait.h>
+          #include <unistd.h>
+
+          #define MAXSEG 32
+          #define MAGIC 0x5248465053504431ULL
+
+          struct __attribute__((packed)) Footer {
+            uint64_t magic;
+            uint64_t decoder_size;
+            uint64_t nseg;
+            uint64_t comp_size[MAXSEG];
+            uint64_t raw_size[MAXSEG];
+          };
+
+          static void fail(const char *m){perror(m);exit(111);}
+
+          static void extract_n(int self, off_t off, const char *path, uint64_t n, mode_t mode){
+            int out=open(path,O_WRONLY|O_CREAT|O_TRUNC,mode);
+            if(out<0) fail("open");
+            if(lseek(self,off,SEEK_SET)<0) fail("seek");
+            char b[65536];
+            while(n){
+              size_t want=n<sizeof(b)?(size_t)n:sizeof(b);
+              ssize_t r=read(self,b,want);
+              if(r<=0) fail("read");
+              char *p=b; ssize_t left=r;
+              while(left){
+                ssize_t w=write(out,p,(size_t)left);
+                if(w<=0) fail("write");
+                p+=w; left-=w;
+              }
+              n-=(uint64_t)r;
+            }
+            close(out);
+          }
+
+          static void append_file(int out,const char *path,uint64_t expected){
+            int in=open(path,O_RDONLY); if(in<0) fail("part");
+            struct stat st; if(fstat(in,&st)<0) fail("stat");
+            if((uint64_t)st.st_size!=expected) exit(112);
+            char b[65536]; ssize_t r;
+            while((r=read(in,b,sizeof(b)))>0){
+              char *p=b; ssize_t left=r;
+              while(left){
+                ssize_t w=write(out,p,(size_t)left);
+                if(w<=0) fail("write target");
+                p+=w; left-=w;
+              }
+            }
+            if(r<0) fail("read part");
+            close(in);
+          }
+
+          int main(int argc,char **argv){
+            const char *target=(argc>1)?argv[1]:"restored.bin";
+            int self=open("/proc/self/exe",O_RDONLY); if(self<0) fail("self");
+            struct stat st; if(fstat(self,&st)<0) fail("stat self");
+
+            struct Footer f;
+            if(st.st_size<(off_t)sizeof(f)) return 113;
+            if(lseek(self,st.st_size-(off_t)sizeof(f),SEEK_SET)<0) fail("footer seek");
+            if(read(self,&f,sizeof(f))!=(ssize_t)sizeof(f)) fail("footer");
+            if(f.magic!=MAGIC || f.nseg<1 || f.nseg>MAXSEG) return 114;
+
+            uint64_t payload=f.decoder_size;
+            for(uint64_t i=0;i<f.nseg;i++) payload+=f.comp_size[i];
+            off_t stub=st.st_size-(off_t)sizeof(f)-(off_t)payload;
+            if(stub<=0) return 115;
+
+            char root[128];
+            snprintf(root,sizeof(root),".fp-%ld",(long)getpid());
+            if(mkdir(root,0700)<0) fail("mkdir");
+
+            char decoder[160];
+            snprintf(decoder,sizeof(decoder),"%s/decoder",root);
+            extract_n(self,stub,decoder,f.decoder_size,0700);
+
+            off_t pos=stub+(off_t)f.decoder_size;
+            pid_t pids[MAXSEG];
+
+            for(uint64_t i=0;i<f.nseg;i++){
+              char dir[180],pay[220];
+              snprintf(dir,sizeof(dir),"%s/w%llu",root,(unsigned long long)i);
+              if(mkdir(dir,0700)<0) fail("mkdir worker");
+              snprintf(pay,sizeof(pay),"%s/payload",dir);
+              extract_n(self,pos,pay,f.comp_size[i],0600);
+              pos+=(off_t)f.comp_size[i];
+
+              pid_t p=fork();
+              if(p<0) fail("fork");
+              if(p==0){
+                char localdec[220],localpay[220],localout[220];
+                snprintf(localdec,sizeof(localdec),"%s/decoder",dir);
+                snprintf(localpay,sizeof(localpay),"%s/payload",dir);
+                snprintf(localout,sizeof(localout),"%s/out",dir);
+                if(link(decoder,localdec)<0) return 120;
+                execl(localdec,localdec,"-d",localpay,localout,(char*)NULL);
+                _exit(121);
+              }
+              pids[i]=p;
+            }
+
+            close(self);
+
+            for(uint64_t i=0;i<f.nseg;i++){
+              int status=0;
+              if(waitpid(pids[i],&status,0)<0) fail("wait");
+              if(!WIFEXITED(status)||WEXITSTATUS(status)!=0) return 122;
+            }
+
+            int out=open(target,O_WRONLY|O_CREAT|O_TRUNC,0600);
+            if(out<0) fail("target");
+            for(uint64_t i=0;i<f.nseg;i++){
+              char dir[180],part[220];
+              snprintf(dir,sizeof(dir),"%s/w%llu",root,(unsigned long long)i);
+              snprintf(part,sizeof(part),"%s/out",dir);
+              append_file(out,part,f.raw_size[i]);
+            }
+            close(out);
+            return 0;
+          }
+          C
+
+          gcc -Os -s -fno-ident -ffunction-sections -fdata-sections -Wl,--gc-sections               /tmp/fp_stub.c -o /tmp/fp_stub
+
+          rm -rf /tmp/candidates
+          mkdir -p /tmp/candidates
+          : > /tmp/results.tsv
+
+          for N in 1 2 4 8 16 32; do
+            W="/tmp/work-$N"
+            rm -rf "$W"
+            mkdir -p "$W"
+
+            python3 - "$N" "$W" <<'PY'
+          import pathlib,sys
+          n=int(sys.argv[1]); w=pathlib.Path(sys.argv[2])
+          data=pathlib.Path("/tmp/source.bin").read_bytes()
+          q,r=divmod(len(data),n)
+          p=0
+          for i in range(n):
+              z=q+(1 if i<r else 0)
+              (w/f"raw-{i}").write_bytes(data[p:p+z])
+              p+=z
+          PY
+
+            # Compress independent segments in parallel. The number of live
+            # compressors is capped by the runner CPU count.
+            MAXJ="$(nproc)"
+            active=0
+            for ((i=0;i<N;i++)); do
+              (
+                /tmp/baby_decoder -c "$W/raw-$i" "$W/comp-$i" >/dev/null 2>&1
+              ) &
+              active=$((active+1))
+              if [ "$active" -ge "$MAXJ" ]; then
+                wait -n
+                active=$((active-1))
+              fi
+            done
+            wait
+
+            FP="/tmp/candidates/fingerprint-$N"
+            cp /tmp/fp_stub "$FP"
+            cat /tmp/baby_decoder >> "$FP"
+            for ((i=0;i<N;i++)); do cat "$W/comp-$i" >> "$FP"; done
+
+            python3 - "$N" "$W" "$FP" <<'PY'
+          import pathlib,struct,sys
+          n=int(sys.argv[1]); w=pathlib.Path(sys.argv[2]); fp=pathlib.Path(sys.argv[3])
+          dec=pathlib.Path("/tmp/baby_decoder").stat().st_size
+          cs=[(w/f"comp-{i}").stat().st_size for i in range(n)]
+          rs=[(w/f"raw-{i}").stat().st_size for i in range(n)]
+          cs += [0]*(32-len(cs)); rs += [0]*(32-len(rs))
+          with fp.open("ab") as f:
+              f.write(struct.pack("<QQQ32Q32Q",0x5248465053504431,dec,n,*cs,*rs))
+          fp.chmod(0o700)
+          PY
+
+            V="/tmp/verify-$N"
+            rm -rf "$V"; mkdir -p "$V"
+            START="$(date +%s%N)"
+            (
+              cd "$V"
+              "$FP" restored.bin
+            )
+            END="$(date +%s%N)"
+            MS="$(( (END-START)/1000000 ))"
+
+            test "$(sha256sum "$V/restored.bin" | awk '{print $1}')" = "$SOURCE_SHA256"
+            BYTES="$(stat -c%s "$FP")"
+            printf "%s\t%s\t%s\n" "$N" "$BYTES" "$MS" >> /tmp/results.tsv
+          done
+
+          cat /tmp/results.tsv
+
+          python3 - <<'PY'
+          import pathlib
+          target=13000
+          rows=[]
+          for line in pathlib.Path("/tmp/results.tsv").read_text().splitlines():
+              n,b,ms=map(int,line.split("\t"))
+              rows.append((n,b,ms))
+          fast=[r for r in rows if r[2] < target]
+          if fast:
+              # Primary goal remains smallest one-file fingerprint. Restore time
+              # is a tie-breaker once the requested <13s target is met.
+              best=min(fast,key=lambda r:(r[1],r[2],r[0]))
+          else:
+              best=min(rows,key=lambda r:(r[2],r[1],r[0]))
+          n,b,ms=best
+          pathlib.Path("/tmp/best.n").write_text(str(n))
+          pathlib.Path("/tmp/best.bytes").write_text(str(b))
+          pathlib.Path("/tmp/best.ms").write_text(str(ms))
+          pathlib.Path("/tmp/fingerprint").write_bytes(pathlib.Path(f"/tmp/candidates/fingerprint-{n}").read_bytes())
+          pathlib.Path("/tmp/fingerprint").chmod(0o700)
+          print(f"BEST_WORKERS={n}")
+          print(f"FINGERPRINT_BYTES={b}")
+          print(f"LOCAL_RESTORE_MS={ms}")
+          print("LOCAL_SHA256=PASS")
+          PY
+
+      - id: meta
+        name: Publish speed metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_sha256=$(cat /tmp/source.sha256)" >> "$GITHUB_OUTPUT"
+          echo "source_bytes=$(stat -c%s /tmp/source.bin)" >> "$GITHUB_OUTPUT"
+          echo "fingerprint_bytes=$(cat /tmp/best.bytes)" >> "$GITHUB_OUTPUT"
+          echo "workers=$(cat /tmp/best.n)" >> "$GITHUB_OUTPUT"
+          echo "local_restore_ms=$(cat /tmp/best.ms)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: speed-one-fingerprint
+          path: /tmp/fingerprint
+          retention-days: 7
+          if-no-files-found: error
+
+  clean-receiver:
+    needs: speed-probe
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: speed-one-fingerprint
+          path: receive
+
+      - name: Restore from exactly one transferred fingerprint
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.speed-probe.outputs.source_sha256 }}
+          EXPECTED_BYTES: ${{ needs.speed-probe.outputs.source_bytes }}
+          EXPECTED_FP_BYTES: ${{ needs.speed-probe.outputs.fingerprint_bytes }}
+          EXPECTED_WORKERS: ${{ needs.speed-probe.outputs.workers }}
+        run: |
+          set -euo pipefail
+
+          test "$(find receive -maxdepth 1 -type f | wc -l)" -eq 1
+          test -f receive/fingerprint
+          test "$(stat -c%s receive/fingerprint)" = "$EXPECTED_FP_BYTES"
+
+          mkdir naked
+          mv receive/fingerprint naked/fingerprint
+          rmdir receive
+          chmod +x naked/fingerprint
+
+          START="$(date +%s%N)"
+          (
+            cd naked
+            ./fingerprint restored.bin
+          )
+          END="$(date +%s%N)"
+          MS="$(( (END-START)/1000000 ))"
+
+          test "$(stat -c%s naked/restored.bin)" = "$EXPECTED_BYTES"
+          ACTUAL="$(sha256sum naked/restored.bin | awk '{print $1}')"
+          test "$ACTUAL" = "$EXPECTED_SHA256"
+
+          echo "STATUS=PASS_ONE_FILE_SPEED_PROBE"
+          echo "TRANSFER_FILES=1"
+          echo "FINGERPRINT_BYTES=$EXPECTED_FP_BYTES"
+          echo "SELF_SPAWNED_WORKERS=$EXPECTED_WORKERS"
+          echo "RESTORE_MS=$MS"
+          echo "BIT_IDENTICAL=PASS"
