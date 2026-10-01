@@ -5,7 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'scripts/rhodium-zero-payload-ultimo.ps1'
+      - 'scripts/rhodium-zero-payload-ultimo.sh'
+      - '.github/workflows/rhodium-zero-payload-ultimo.yml'
   workflow_dispatch:
 
 permissions:
@@ -19,5 +20,5 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       - name: Run exact Ubuntu benchmark
-        shell: pwsh
-        run: pwsh -NoProfile -File .\scripts\rhodium-zero-payload-ultimo.ps1
+        shell: bash
+        run: bash ./scripts/rhodium-zero-payload-ultimo.sh
