@@ -1,0 +1,42 @@
+name: Trinary Dot Matrix 32
+
+on:
+  push:
+    paths:
+      - ".github/workflows/trinary-dot-matrix-32.yml"
+      - "scripts/trinary_dot_matrix_test.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trinary:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download fresh foreign Internet sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3             --connect-timeout 20 --max-time 600             --range 0-1048575             --silent --show-error             https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz             --output sample.bin
+          test "$(stat -c%s sample.bin)" -ge 1048576
+          truncate -s 1048576 sample.bin
+          echo "SOURCE_BYTES=$(stat -c%s sample.bin)"
+
+      - name: Run 3-state matrix encode/decode with 32 workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/trinary_dot_matrix_test.py
+
+      - name: Upload measured result
+        uses: actions/upload-artifact@v4
+        with:
+          name: trinary-dot-matrix-32-${{ github.run_id }}
+          path: evidence/trinary-dot-matrix-result.json
+          if-no-files-found: error
+          retention-days: 7
