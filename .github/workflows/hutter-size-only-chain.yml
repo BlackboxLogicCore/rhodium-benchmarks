@@ -1,4 +1,4 @@
-name: Hutter Size-Only Evolution Chain
+name: Hutter 32-Way Burst Size-Only
 
 on:
   push:
@@ -13,269 +13,148 @@ env:
   UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
 
 jobs:
-  gen1:
-    name: size-gen1-${{ matrix.seed }}-${{ matrix.limit }}
+  burst:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 32
-      matrix:
-        seed: [1009, 1019, 1021, 1031, 1033, 1039, 1049, 1061]
-        limit: [4000, 4200, 4600, 5200]
+    timeout-minutes: 360
 
     steps:
-      - name: Build and judge only net bytes
+      - name: Launch all 32 candidates at once
         shell: bash
         run: |
           set -euo pipefail
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common
+
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 17 >/dev/null
           rm llvm.sh
 
-          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
-          cd fx2
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git base
+          cd base
           git checkout "$UPSTREAM_COMMIT"
+          cd ..
 
-          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
-          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
-          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+          mkdir -p work tmp results
 
-          mkdir -p /tmp/g
-          cp prof_input/input /tmp/g/input
+          run_one() {
+            seed="$1"
+            limit="$2"
+            id="${seed}-${limit}"
+            dir="$GITHUB_WORKSPACE/work/$id"
+            tmp="$GITHUB_WORKSPACE/tmp/$id"
 
-          ./run/cmix -c /tmp/g/input /tmp/g/base.archive >/tmp/base.log 2>&1
+            cp -a "$GITHUB_WORKSPACE/base" "$dir"
+            mkdir -p "$tmp"
 
-          cp run/cmix_orig run/cmix_size_prefix
-          upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
-          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
-          "$STRIP_BIN" --strip-all run/cmix_size_prefix
-          upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
-          cat run/cmix_size_prefix run/comp_dict run/comp_order run/comp_tfweights run/header.dat > run/cmix_size_candidate
-          chmod +x run/cmix_size_candidate
+            (
+              set -euo pipefail
+              cd "$dir"
 
-          ./run/cmix_size_candidate -c /tmp/g/input /tmp/g/archive >/tmp/candidate.log 2>&1
-          test "$(sha256sum /tmp/g/base.archive | awk '{print $1}')" = "$(sha256sum /tmp/g/archive | awk '{print $1}')"
+              sed -i "s/^SEED=\"923\"$/SEED=\"${seed}\"/" build_and_construct_comp.sh
+              sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"${limit}\"/" build_and_construct_comp.sh
 
-          ./run/cmix_size_candidate -d /tmp/g/archive /tmp/g/restored >/tmp/restore.log 2>&1
-          test "$(sha256sum /tmp/g/input | awk '{print $1}')" = "$(sha256sum /tmp/g/restored | awk '{print $1}')"
+              ./build_and_construct_comp.sh >"$tmp/build.log" 2>&1
 
-          COMP=$(stat -c%s run/cmix_size_candidate)
-          ARC=$(stat -c%s /tmp/g/archive)
-          TOTAL=$((COMP+ARC))
+              cp run/cmix_orig run/cmix_size_prefix
+              upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
 
-          python3 - <<PY
+              STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+              "$STRIP_BIN" --strip-all run/cmix_size_prefix
+              upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
+
+              cat                 run/cmix_size_prefix                 run/comp_dict                 run/comp_order                 run/comp_tfweights                 run/header.dat                 > run/cmix_size_candidate
+              chmod +x run/cmix_size_candidate
+
+              cp prof_input/input "$tmp/input"
+
+              ./run/cmix_size_candidate -c "$tmp/input" "$tmp/archive" >"$tmp/compress.log" 2>&1
+              ./run/cmix_size_candidate -d "$tmp/archive" "$tmp/restored" >"$tmp/decompress.log" 2>&1
+
+              SRC_HASH="$(sha256sum "$tmp/input" | awk '{print $1}')"
+              DST_HASH="$(sha256sum "$tmp/restored" | awk '{print $1}')"
+              test "$SRC_HASH" = "$DST_HASH"
+
+              COMP_BYTES="$(stat -c%s run/cmix_size_candidate)"
+              ARCHIVE_BYTES="$(stat -c%s "$tmp/archive")"
+              TOTAL_BYTES="$((COMP_BYTES + ARCHIVE_BYTES))"
+
+              python3 - <<PY
           import json
-          r={
-            "generation":1,
-            "seed":${{ matrix.seed }},
-            "update_limit":${{ matrix.limit }},
-            "compressor_bytes":$COMP,
-            "archive_bytes":$ARC,
-            "net_total_bytes":$TOTAL,
-            "roundtrip":"PASS",
-            "packaging_equivalence":"PASS",
-            "runtime_is_selection_metric":False,
-            "box_changed":False
+          row = {
+            "seed": int("$seed"),
+            "update_limit": int("$limit"),
+            "compressor_bytes": int("$COMP_BYTES"),
+            "archive_bytes": int("$ARCHIVE_BYTES"),
+            "net_total_bytes": int("$TOTAL_BYTES"),
+            "roundtrip": "PASS"
           }
-          open("size-result.json","w").write(json.dumps(r,sort_keys=True)+"\n")
-          print(json.dumps(r,indent=2,sort_keys=True))
+          open("$GITHUB_WORKSPACE/results/$id.json","w").write(
+              json.dumps(row, sort_keys=True) + "\\n"
+          )
           PY
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: size-gen1-${{ matrix.seed }}-${{ matrix.limit }}
-          path: fx2/size-result.json
-          retention-days: 7
-
-  select1:
-    needs: gen1
-    if: always()
-    runs-on: ubuntu-22.04
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-      elite_seed: ${{ steps.pick.outputs.elite_seed }}
-      elite_limit: ${{ steps.pick.outputs.elite_limit }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: size-gen1-*
-          path: results
-          merge-multiple: false
-
-      - id: pick
-        name: Select strict net-byte winner
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import glob,json
-          rows=[]
-          for p in glob.glob("results/**/size-result.json",recursive=True):
-              try:
-                  x=json.load(open(p))
-                  if x.get("roundtrip")=="PASS" and x.get("packaging_equivalence")=="PASS":
-                      rows.append(x)
-              except Exception:
-                  pass
-          if not rows:
-              raise SystemExit("NO_VALID_SIZE_CANDIDATES")
-
-          # Runtime is deliberately absent. Net bytes decide; archive bytes break exact ties.
-          rows.sort(key=lambda x:(x["net_total_bytes"],x["archive_bytes"],x["compressor_bytes"]))
-          elite=rows[0]
-          s=int(elite["seed"]); l=int(elite["update_limit"])
-
-          seeds=[s,s+1,s+2,s+4]
-          limits=[max(200,l+d) for d in (-240,-160,-80,0,80,160,320,640)]
-          matrix={"include":[{"seed":a,"limit":b} for a in seeds for b in limits]}
-
-          print("matrix="+json.dumps(matrix,separators=(",",":")))
-          print("elite_seed="+str(s))
-          print("elite_limit="+str(l))
-
-          with open("gen1-size-elite.json","w") as f:
-              json.dump({"verified":len(rows),"elite":elite},f,indent=2,sort_keys=True)
-              f.write("\n")
-          PY
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gen1-size-elite
-          path: gen1-size-elite.json
-          retention-days: 7
-
-  gen2:
-    needs: select1
-    name: size-gen2-${{ matrix.seed }}-${{ matrix.limit }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 32
-      matrix: ${{ fromJSON(needs.select1.outputs.matrix) }}
-
-    steps:
-      - name: Build inherited size-only candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common
-          wget -q https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 17 >/dev/null
-          rm llvm.sh
-
-          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
-          cd fx2
-          git checkout "$UPSTREAM_COMMIT"
-
-          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
-          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
-          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
-
-          mkdir -p /tmp/g
-          cp prof_input/input /tmp/g/input
-          ./run/cmix -c /tmp/g/input /tmp/g/base.archive >/tmp/base.log 2>&1
-
-          cp run/cmix_orig run/cmix_size_prefix
-          upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
-          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
-          "$STRIP_BIN" --strip-all run/cmix_size_prefix
-          upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
-          cat run/cmix_size_prefix run/comp_dict run/comp_order run/comp_tfweights run/header.dat > run/cmix_size_candidate
-          chmod +x run/cmix_size_candidate
-
-          ./run/cmix_size_candidate -c /tmp/g/input /tmp/g/archive >/tmp/candidate.log 2>&1
-          test "$(sha256sum /tmp/g/base.archive | awk '{print $1}')" = "$(sha256sum /tmp/g/archive | awk '{print $1}')"
-          ./run/cmix_size_candidate -d /tmp/g/archive /tmp/g/restored >/tmp/restore.log 2>&1
-          test "$(sha256sum /tmp/g/input | awk '{print $1}')" = "$(sha256sum /tmp/g/restored | awk '{print $1}')"
-
-          COMP=$(stat -c%s run/cmix_size_candidate)
-          ARC=$(stat -c%s /tmp/g/archive)
-          TOTAL=$((COMP+ARC))
-
-          python3 - <<PY
-          import json
-          r={
-            "generation":2,
-            "seed":${{ matrix.seed }},
-            "update_limit":${{ matrix.limit }},
-            "compressor_bytes":$COMP,
-            "archive_bytes":$ARC,
-            "net_total_bytes":$TOTAL,
-            "roundtrip":"PASS",
-            "packaging_equivalence":"PASS",
-            "runtime_is_selection_metric":False,
-            "parent_seed":${{ needs.select1.outputs.elite_seed }},
-            "parent_limit":${{ needs.select1.outputs.elite_limit }},
-            "box_changed":False
+            )
           }
-          open("size-result.json","w").write(json.dumps(r,sort_keys=True)+"\n")
-          print(json.dumps(r,indent=2,sort_keys=True))
-          PY
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: size-gen2-${{ matrix.seed }}-${{ matrix.limit }}
-          path: fx2/size-result.json
-          retention-days: 7
+          pids=()
+          for seed in 1009 1019 1021 1031 1033 1039 1049 1061; do
+            for limit in 4000 4200 4600 5200; do
+              (run_one "$seed" "$limit" || echo "FAILED=${seed}-${limit}") &
+              pids+=("$!")
+            done
+          done
 
-  final:
-    needs: gen2
-    if: always()
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: size-gen2-*
-          path: results
-          merge-multiple: false
+          for pid in "${pids[@]}"; do
+            wait "$pid" || true
+          done
 
-      - name: Select final minimum-byte candidate
-        shell: bash
-        run: |
-          set -euo pipefail
           python3 - <<'PY'
-          import glob,json,os
-          rows=[]
-          for p in glob.glob("results/**/size-result.json",recursive=True):
+          import glob, json, os
+
+          rows = []
+          for path in glob.glob("results/*.json"):
               try:
-                  x=json.load(open(p))
-                  if x.get("roundtrip")=="PASS" and x.get("packaging_equivalence")=="PASS":
-                      rows.append(x)
+                  row = json.load(open(path))
+                  if row.get("roundtrip") == "PASS":
+                      rows.append(row)
               except Exception:
                   pass
-          if not rows:
-              raise SystemExit("NO_VALID_GEN2_SIZE_CANDIDATES")
 
-          rows.sort(key=lambda x:(x["net_total_bytes"],x["archive_bytes"],x["compressor_bytes"]))
-          elite=rows[0]
-          out={
-            "verified_candidates":len(rows),
-            "final_elite":elite,
-            "selection_metric":"NET_TOTAL_BYTES_ONLY",
-            "runtime_ignored":True,
-            "full_enwik9_required":True
+          if not rows:
+              raise SystemExit("NO_VALID_CANDIDATES")
+
+          rows.sort(key=lambda x: (
+              x["net_total_bytes"],
+              x["archive_bytes"],
+              x["compressor_bytes"]
+          ))
+
+          result = {
+              "verified_candidates": len(rows),
+              "best": rows[0],
+              "selection_metric": "NET_TOTAL_BYTES_ONLY",
+              "runtime_used_for_selection": False
           }
-          open("hutter-size-only-result.json","w").write(json.dumps(out,indent=2,sort_keys=True)+"\n")
-          print(json.dumps(out,indent=2,sort_keys=True))
-          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
-              f.write("## Hutter size-only chain\n\n")
-              f.write(f"Verified Gen2 candidates: {len(rows)}\n\n")
-              f.write(f"Final seed={elite['seed']} limit={elite['update_limit']}\n\n")
-              f.write(f"Archive={elite['archive_bytes']} bytes\n\n")
-              f.write(f"Compressor={elite['compressor_bytes']} bytes\n\n")
-              f.write(f"Net total={elite['net_total_bytes']} bytes\n\n")
-              f.write("Runtime was not used for candidate selection.\n")
+
+          open("hutter-32-burst-result.json","w").write(
+              json.dumps(result, indent=2, sort_keys=True) + "\n"
+          )
+
+          print(json.dumps(result, indent=2, sort_keys=True))
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              b = rows[0]
+              f.write("## Hutter 32-way burst\n\n")
+              f.write(f"Verified: {len(rows)}/32\n\n")
+              f.write(f"Best seed={b['seed']} limit={b['update_limit']}\n\n")
+              f.write(f"Archive={b['archive_bytes']} bytes\n\n")
+              f.write(f"Compressor={b['compressor_bytes']} bytes\n\n")
+              f.write(f"Net total={b['net_total_bytes']} bytes\n")
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hutter-size-only-result
-          path: hutter-size-only-result.json
+          name: hutter-32-burst-result
+          path: hutter-32-burst-result.json
           retention-days: 7
