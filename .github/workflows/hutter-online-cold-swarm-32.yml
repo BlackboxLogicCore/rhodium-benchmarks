@@ -165,6 +165,7 @@ jobs:
           retention-days: 7
 
   fresh-cold-final:
+    if: ${{ false }}
     needs: select
     runs-on: ubuntu-22.04
     timeout-minutes: 360
