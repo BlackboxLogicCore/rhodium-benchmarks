@@ -1,4 +1,5 @@
 name: Rhodium Fingerprint Recognition 32
+# FRESH_DOWNLOAD_REQUEST=2026-10-01T15:10:00+02:00
 
 on:
   push:
