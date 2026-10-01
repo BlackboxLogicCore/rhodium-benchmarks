@@ -22,6 +22,7 @@ RESTORE_DIR_2="$WORK_DIR/restored_2"
 RESTORED_FILE_1="$RESTORE_DIR_1/enwik9"
 RESTORED_FILE_2="$RESTORE_DIR_2/enwik9"
 JSON_REPORT_PATH="$WORK_DIR/rhodium_hutter_result.json"
+SCRIPT_PATH="$(readlink -f "$0")"
 
 mkdir -p "$WORK_DIR" "$RESTORE_DIR_1" "$RESTORE_DIR_2"
 cd "$WORK_DIR"
@@ -83,7 +84,6 @@ RESTORED_SHA1_2=$(sha1sum "$RESTORED_FILE_2" | awk '{print $1}')
 RESTORED_SHA256_1=$(sha256sum "$RESTORED_FILE_1" | awk '{print $1}')
 RESTORED_SHA256_2=$(sha256sum "$RESTORED_FILE_2" | awk '{print $1}')
 
-SCRIPT_PATH="$(readlink -f "$0")"
 SCRIPT_SIZE=$(stat -c%s "$SCRIPT_PATH")
 TOTAL_SCORE=$((SCRIPT_SIZE + ARCHIVE_BYTES))
 
