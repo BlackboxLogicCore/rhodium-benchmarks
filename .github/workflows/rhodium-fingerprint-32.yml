@@ -1,0 +1,143 @@
+name: Rhodium Fingerprint Recognition 32
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rhodium-fingerprint-32.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recover unchanged Rhodium runtime
+        env:
+          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 || secrets.RG_ENGINE_GZ_B64 }}
+          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 || secrets.RG_HARNESS_GZ_B64 }}
+          RH_ADAPTER: ${{ secrets.RHODIUM_ENWIK9_ADAPTER_GZ_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          from scripts.enwik9_remote_test import EXPECTED_RUNTIME
+
+          root = Path("private-runtime")
+          root.mkdir(exist_ok=False)
+
+          for variable, name in [
+              ("RH_ENGINE", "matrix_live.py"),
+              ("RH_HARNESS", "matrix_blackbox.py"),
+              ("RH_ADAPTER", "adapter.py"),
+          ]:
+              encoded = os.environ.get(variable, "").lstrip("\ufeff")
+              if not encoded:
+                  raise SystemExit("RUNTIME_PACKAGE_MISSING")
+              raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+              if hashlib.sha256(raw).hexdigest() != EXPECTED_RUNTIME[name]:
+                  raise SystemExit("RUNTIME_HASH_MISMATCH")
+              target = root / name
+              target.write_bytes(raw)
+              target.chmod(0o400)
+
+          print("RUNTIME_UNCHANGED=PASS")
+          PY
+
+      - name: Execute existing recognition path
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/enwik9_remote_test.py
+
+      - name: Validate recognition result with 32 simultaneous workers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fingerprint-validation
+
+          validate_one() {
+            id="$1"
+            python3 - "$id" <<'PY'
+          import json, pathlib, sys
+
+          worker = int(sys.argv[1])
+          report = json.loads(pathlib.Path("evidence/enwik9-result.json").read_text())
+
+          metrics = report.get("metrics", {})
+          ok = (
+              report.get("status") == "PASS_ENWIK9_ROUNDTRIP"
+              and report.get("runtime_unchanged") is True
+              and metrics.get("WARM_HASH_MATCH") == "True"
+              and metrics.get("WARM_BIT_IDENTICAL") == "True"
+              and int(metrics.get("WARM_WIRE_BYTES", "-1")) >= 0
+          )
+
+          if not ok:
+              raise SystemExit("RECOGNITION_VALIDATION_FAIL")
+
+          pathlib.Path(f"fingerprint-validation/worker-{worker:02d}.pass").write_text("PASS\n")
+          PY
+          }
+
+          pids=()
+          for id in $(seq 1 32); do
+            validate_one "$id" &
+            pids+=("$!")
+          done
+
+          for pid in "${pids[@]}"; do
+            wait "$pid"
+          done
+
+          test "$(find fingerprint-validation -name '*.pass' | wc -l)" -eq 32
+
+          python3 - <<'PY'
+          import json, pathlib
+
+          report = json.loads(pathlib.Path("evidence/enwik9-result.json").read_text())
+          m = report["metrics"]
+
+          result = {
+              "status": "PASS" if len(list(pathlib.Path("fingerprint-validation").glob("*.pass"))) == 32 else "FAIL",
+              "workers": 32,
+              "validation_mode": "SIMULTANEOUS",
+              "source_bytes": int(m["SOURCE_BYTES"]),
+              "recognition_wire_bytes": int(m["WARM_WIRE_BYTES"]),
+              "blocks_reused": int(m["WARM_BLOCKS_REUSED"]),
+              "bit_identical": m["WARM_BIT_IDENTICAL"] == "True",
+              "runtime_unchanged": report.get("runtime_unchanged") is True,
+          }
+
+          pathlib.Path("evidence/fingerprint-32-result.json").write_text(
+              json.dumps(result, indent=2, sort_keys=True) + "\n"
+          )
+
+          print(json.dumps(result, indent=2, sort_keys=True))
+          PY
+
+      - name: Remove private runtime and source
+        if: always()
+        shell: bash
+        run: rm -rf private-runtime private-work fingerprint-validation
+
+      - name: Upload result only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhodium-fingerprint-32-${{ github.run_id }}
+          path: |
+            evidence/enwik9-result.json
+            evidence/fingerprint-32-result.json
+          if-no-files-found: ignore
+          retention-days: 7
