@@ -1,0 +1,65 @@
+name: Zero Payload Gateway Ready
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Explicit owner start gate"
+        required: true
+        default: "NO"
+        type: choice
+        options:
+          - "NO"
+          - "YES"
+
+permissions:
+  contents: read
+
+jobs:
+  zero-payload-test:
+    if: ${{ inputs.confirm == 'YES' }}
+    runs-on: windows-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Zero-Payload Gateway
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $ZeroDir = Join-Path $env:RUNNER_TEMP "zero_payload_box"
+          if (!(Test-Path $ZeroDir)) {
+            New-Item -ItemType Directory -Path $ZeroDir -Force | Out-Null
+          }
+          Set-Location $ZeroDir
+
+          Write-Host "[INIT] Aktiviere Zero-Payload Gateway (0-Byte Impuls)..."
+
+          # 1. Exakt 0 Bytes Payload
+          $ZeroPath = Join-Path $ZeroDir "atom_zero.bin"
+          [System.IO.File]::WriteAllBytes($ZeroPath, [byte[]]@())
+          $ZeroSize = (Get-Item $ZeroPath).Length
+          if ($ZeroSize -ne 0) { throw "ZERO_SIZE_FAIL" }
+
+          # 2. SHA-256 des leeren Impulses
+          $ZeroHash = (Get-FileHash -Path $ZeroPath -Algorithm SHA256).Hash
+
+          # 3. Null-Signal-Trigger im selben isolierten Runner
+          $TargetOut = Join-Path $ZeroDir "ziel_container_detonation.bin"
+          [System.IO.File]::Copy($ZeroPath, $TargetOut, $true)
+          $RestoredHash = (Get-FileHash -Path $TargetOut -Algorithm SHA256).Hash
+
+          if ($ZeroHash -ne $RestoredHash) { throw "BIT_IDENTICAL_FAIL" }
+          if ((Get-Item $TargetOut).Length -ne 0) { throw "RESTORE_SIZE_FAIL" }
+
+          Write-Host "----------------------------------------"
+          Write-Host " ZERO-PAYLOAD GATEWAY ERGEBNIS:"
+          Write-Host " PAYLOAD_BYTES=$ZeroSize"
+          Write-Host " SHA256_ORIGINAL=$ZeroHash"
+          Write-Host " SHA256_RESTORED=$RestoredHash"
+          Write-Host " BIT_IDENTICAL=PASS"
+          Write-Host " STATUS=PASS_ZERO_PAYLOAD_GATEWAY"
+          Write-Host "----------------------------------------"
+
+          Remove-Item $ZeroPath -ErrorAction SilentlyContinue
+          Remove-Item $TargetOut -ErrorAction SilentlyContinue
