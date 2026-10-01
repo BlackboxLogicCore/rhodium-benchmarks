@@ -1,0 +1,247 @@
+name: Hutter Auto Evolution Chain
+
+on:
+  workflow_run:
+    workflows: ["Hutter Elite Inheritance Research"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  prepare:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.make.outputs.matrix }}
+      parent_seed: ${{ steps.make.outputs.parent_seed }}
+      parent_limit: ${{ steps.make.outputs.parent_limit }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hutter-elite-ledger
+          path: parent
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - id: make
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          x=json.load(open("parent/elite-ledger.json"))
+          e=x["elite"]
+          s=int(e["seed"]); l=int(e["update_limit"])
+          seeds=[s,s+2,s+6,s+12]
+          limits=[max(200,l+d) for d in (-300,-200,-100,0,100,200,300,400)]
+          inc=[{"seed":a,"limit":b} for a in seeds for b in limits]
+          print("matrix="+json.dumps({"include":inc},separators=(",",":")))
+          print("parent_seed="+str(s))
+          print("parent_limit="+str(l))
+          PY
+
+  gen2:
+    needs: prepare
+    name: gen2-${{ matrix.seed }}-${{ matrix.limit }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: Build Gen2 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common time
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout 83f2603f3f7751da5f429fd32669807eb8510494
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          mkdir -p /tmp/c
+          cp prof_input/input /tmp/c/input
+          /usr/bin/time -f "%e" -o /tmp/cs ./run/cmix -c /tmp/c/input /tmp/c/archive >/tmp/c.log 2>&1
+          /usr/bin/time -f "%e" -o /tmp/ds ./run/cmix -d /tmp/c/archive /tmp/c/restored >/tmp/d.log 2>&1
+          test "$(sha256sum /tmp/c/input | awk '{print $1}')" = "$(sha256sum /tmp/c/restored | awk '{print $1}')"
+
+          COMP=$(stat -c%s run/cmix)
+          ARC=$(stat -c%s /tmp/c/archive)
+          TOT=$((COMP+ARC))
+          CS=$(cat /tmp/cs)
+          DS=$(cat /tmp/ds)
+
+          python3 - <<PY
+          import json
+          r={"generation":2,"seed":${{ matrix.seed }},"update_limit":${{ matrix.limit }},
+             "compressor_bytes":$COMP,"sample_archive_bytes":$ARC,"sample_total_bytes":$TOT,
+             "compress_seconds":float("$CS"),"decompress_seconds":float("$DS"),
+             "roundtrip":"PASS","parent_seed":${{ needs.prepare.outputs.parent_seed }},
+             "parent_limit":${{ needs.prepare.outputs.parent_limit }}}
+          open("candidate.json","w").write(json.dumps(r,sort_keys=True)+"\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gen2-${{ matrix.seed }}-${{ matrix.limit }}
+          path: fx2/candidate.json
+          retention-days: 7
+
+  select2:
+    needs: [prepare, gen2]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      elite_seed: ${{ steps.pick.outputs.elite_seed }}
+      elite_limit: ${{ steps.pick.outputs.elite_limit }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gen2-*
+          path: r
+          merge-multiple: false
+
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob,json
+          rows=[]
+          for p in glob.glob("r/**/candidate.json",recursive=True):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS": rows.append(x)
+              except Exception: pass
+          if not rows: raise SystemExit("NO_GEN2_PASS")
+          rows.sort(key=lambda x:(x["sample_total_bytes"],x["compress_seconds"]+x["decompress_seconds"],x["compressor_bytes"]))
+          e=rows[0]
+          s=int(e["seed"]); l=int(e["update_limit"])
+          seeds=[s,s+1,s+3,s+7]
+          limits=[max(200,l+d) for d in (-160,-120,-80,-40,0,40,80,120)]
+          inc=[{"seed":a,"limit":b} for a in seeds for b in limits]
+          print("matrix="+json.dumps({"include":inc},separators=(",",":")))
+          print("elite_seed="+str(s))
+          print("elite_limit="+str(l))
+          open("gen2-elite.json","w").write(json.dumps({"elite":e,"verified":len(rows)},indent=2)+"\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gen2-elite-ledger
+          path: gen2-elite.json
+          retention-days: 7
+
+  gen3:
+    needs: select2
+    name: gen3-${{ matrix.seed }}-${{ matrix.limit }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix: ${{ fromJSON(needs.select2.outputs.matrix) }}
+
+    steps:
+      - name: Build Gen3 candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common time
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout 83f2603f3f7751da5f429fd32669807eb8510494
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          mkdir -p /tmp/c
+          cp prof_input/input /tmp/c/input
+          /usr/bin/time -f "%e" -o /tmp/cs ./run/cmix -c /tmp/c/input /tmp/c/archive >/tmp/c.log 2>&1
+          /usr/bin/time -f "%e" -o /tmp/ds ./run/cmix -d /tmp/c/archive /tmp/c/restored >/tmp/d.log 2>&1
+          test "$(sha256sum /tmp/c/input | awk '{print $1}')" = "$(sha256sum /tmp/c/restored | awk '{print $1}')"
+
+          COMP=$(stat -c%s run/cmix)
+          ARC=$(stat -c%s /tmp/c/archive)
+          TOT=$((COMP+ARC))
+          CS=$(cat /tmp/cs)
+          DS=$(cat /tmp/ds)
+
+          python3 - <<PY
+          import json
+          r={"generation":3,"seed":${{ matrix.seed }},"update_limit":${{ matrix.limit }},
+             "compressor_bytes":$COMP,"sample_archive_bytes":$ARC,"sample_total_bytes":$TOT,
+             "compress_seconds":float("$CS"),"decompress_seconds":float("$DS"),
+             "roundtrip":"PASS","parent_seed":${{ needs.select2.outputs.elite_seed }},
+             "parent_limit":${{ needs.select2.outputs.elite_limit }}}
+          open("candidate.json","w").write(json.dumps(r,sort_keys=True)+"\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gen3-${{ matrix.seed }}-${{ matrix.limit }}
+          path: fx2/candidate.json
+          retention-days: 7
+
+  select3:
+    needs: gen3
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gen3-*
+          path: r
+          merge-multiple: false
+
+      - name: Select final chained elite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob,json,os
+          rows=[]
+          for p in glob.glob("r/**/candidate.json",recursive=True):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS": rows.append(x)
+              except Exception: pass
+          if not rows: raise SystemExit("NO_GEN3_PASS")
+          rows.sort(key=lambda x:(x["sample_total_bytes"],x["compress_seconds"]+x["decompress_seconds"],x["compressor_bytes"]))
+          e=rows[0]
+          out={"verified_candidates":len(rows),"final_elite":e,
+               "promotion":"RESEARCH_ONLY_FULL_ENWIK9_REQUIRED"}
+          open("hutter-auto-chain-result.json","w").write(json.dumps(out,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(out,indent=2,sort_keys=True))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("## Auto evolution chain\n\n")
+              f.write(f"Verified Gen3 candidates: {len(rows)}\n\n")
+              f.write(f"Final elite seed={e['seed']} limit={e['update_limit']}\n\n")
+              f.write(f"Sample total={e['sample_total_bytes']} bytes\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-auto-chain-result
+          path: hutter-auto-chain-result.json
+          retention-days: 7
