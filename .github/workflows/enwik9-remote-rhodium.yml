@@ -27,8 +27,8 @@ jobs:
 
       - name: Recover hash-pinned runtime
         env:
-          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 }}
-          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 }}
+          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 || secrets.RG_ENGINE_GZ_B64 }}
+          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 || secrets.RG_HARNESS_GZ_B64 }}
           RH_ADAPTER: ${{ secrets.RHODIUM_ENWIK9_ADAPTER_GZ_B64 }}
         shell: bash
         run: |
@@ -46,9 +46,7 @@ jobs:
               ("RH_ADAPTER", "adapter.py"),
           ]:
               encoded = os.environ.get(variable, "")
-              # Windows text transport may prepend one UTF-8 byte-order mark.
-              if encoded.startswith("\ufeff"):
-                  encoded = encoded[1:]
+              encoded = encoded.lstrip("\ufeff")
               if not encoded:
                   raise SystemExit("RUNTIME_PACKAGE_MISSING")
               raw = gzip.decompress(base64.b64decode(encoded, validate=True))
