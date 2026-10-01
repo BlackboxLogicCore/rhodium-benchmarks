@@ -1,0 +1,179 @@
+name: Hutter 32 Candidate Research
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hutter-32-candidate-research.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    name: candidate-${{ matrix.id }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        include:
+          - {id: 1, seed: 887, limit: 2400}
+          - {id: 2, seed: 887, limit: 2800}
+          - {id: 3, seed: 887, limit: 3200}
+          - {id: 4, seed: 887, limit: 3600}
+          - {id: 5, seed: 911, limit: 2400}
+          - {id: 6, seed: 911, limit: 2800}
+          - {id: 7, seed: 911, limit: 3200}
+          - {id: 8, seed: 911, limit: 3600}
+          - {id: 9, seed: 923, limit: 2400}
+          - {id: 10, seed: 923, limit: 2800}
+          - {id: 11, seed: 923, limit: 3000}
+          - {id: 12, seed: 923, limit: 3200}
+          - {id: 13, seed: 923, limit: 3600}
+          - {id: 14, seed: 947, limit: 2400}
+          - {id: 15, seed: 947, limit: 2800}
+          - {id: 16, seed: 947, limit: 3200}
+          - {id: 17, seed: 947, limit: 3600}
+          - {id: 18, seed: 971, limit: 2400}
+          - {id: 19, seed: 971, limit: 2800}
+          - {id: 20, seed: 971, limit: 3200}
+          - {id: 21, seed: 971, limit: 3600}
+          - {id: 22, seed: 997, limit: 2400}
+          - {id: 23, seed: 997, limit: 2800}
+          - {id: 24, seed: 997, limit: 3200}
+          - {id: 25, seed: 997, limit: 3600}
+          - {id: 26, seed: 1013, limit: 2400}
+          - {id: 27, seed: 1013, limit: 2800}
+          - {id: 28, seed: 1013, limit: 3200}
+          - {id: 29, seed: 1013, limit: 3600}
+          - {id: 30, seed: 1031, limit: 2600}
+          - {id: 31, seed: 1031, limit: 3000}
+          - {id: 32, seed: 1031, limit: 3400}
+
+    steps:
+      - name: Build isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout 83f2603f3f7751da5f429fd32669807eb8510494
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          mkdir -p /tmp/candidate
+          cp prof_input/input /tmp/candidate/input
+          ./run/cmix -c /tmp/candidate/input /tmp/candidate/archive >/tmp/compress.log 2>&1
+          ./run/cmix -d /tmp/candidate/archive /tmp/candidate/restored >/tmp/decompress.log 2>&1
+
+          SRC_HASH=$(sha256sum /tmp/candidate/input | awk '{print $1}')
+          DST_HASH=$(sha256sum /tmp/candidate/restored | awk '{print $1}')
+          test "$SRC_HASH" = "$DST_HASH"
+
+          COMP_BYTES=$(stat -c%s run/cmix)
+          ARCHIVE_BYTES=$(stat -c%s /tmp/candidate/archive)
+          SCORE=$((COMP_BYTES+ARCHIVE_BYTES))
+
+          python3 - <<'PY'
+          import json, os
+          row = {
+              "id": int("${{ matrix.id }}"),
+              "seed": int("${{ matrix.seed }}"),
+              "update_limit": int("${{ matrix.limit }}"),
+              "compressor_bytes": int(os.environ["COMP_BYTES"]),
+              "sample_archive_bytes": int(os.environ["ARCHIVE_BYTES"]),
+              "sample_total_bytes": int(os.environ["SCORE"]),
+              "roundtrip": "PASS",
+          }
+          open("candidate.json","w").write(json.dumps(row, sort_keys=True)+"\n")
+          print(json.dumps(row, indent=2))
+          PY
+        env:
+          COMP_BYTES: ${{ env.COMP_BYTES }}
+          ARCHIVE_BYTES: ${{ env.ARCHIVE_BYTES }}
+          SCORE: ${{ env.SCORE }}
+
+      - name: Recalculate result file
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd fx2
+          COMP_BYTES=$(stat -c%s run/cmix)
+          ARCHIVE_BYTES=$(stat -c%s /tmp/candidate/archive)
+          SCORE=$((COMP_BYTES+ARCHIVE_BYTES))
+          python3 - <<PY
+          import json
+          row = {
+            "id": ${{ matrix.id }},
+            "seed": ${{ matrix.seed }},
+            "update_limit": ${{ matrix.limit }},
+            "compressor_bytes": $COMP_BYTES,
+            "sample_archive_bytes": $ARCHIVE_BYTES,
+            "sample_total_bytes": $SCORE,
+            "roundtrip": "PASS"
+          }
+          open("candidate-${{ matrix.id }}.json","w").write(json.dumps(row, sort_keys=True)+"\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-candidate-${{ matrix.id }}
+          path: fx2/candidate-${{ matrix.id }}.json
+          retention-days: 7
+
+  select:
+    needs: search
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hutter-candidate-*
+          path: results
+          merge-multiple: true
+
+      - name: Select smallest verified candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json
+          rows=[]
+          for p in glob.glob("results/*.json"):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS":
+                      rows.append(x)
+              except Exception:
+                  pass
+          if not rows:
+              raise SystemExit("NO_VERIFIED_CANDIDATES")
+          rows.sort(key=lambda x:(x["sample_total_bytes"],x["compressor_bytes"],x["id"]))
+          best=rows[0]
+          out={"verified_candidates":len(rows),"best":best,"top5":rows[:5],
+               "note":"Research gate only. A winner here must still pass the full official enwik9 single-core run."}
+          open("hutter-32-search-result.json","w").write(json.dumps(out,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(out,indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("## Hutter 32-candidate research\n\n")
+              f.write(f"Verified candidates: {len(rows)}\n\n")
+              f.write(f"Best ID: {best['id']}  seed={best['seed']}  update_limit={best['update_limit']}\n\n")
+              f.write(f"Sample total: {best['sample_total_bytes']} bytes\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-32-search-result
+          path: hutter-32-search-result.json
+          retention-days: 7
