@@ -1,0 +1,23 @@
+name: Rhodium Zero Payload Ultimo
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/rhodium-zero-payload-ultimo.ps1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-zero-payload:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run exact PowerShell benchmark
+        shell: pwsh
+        run: pwsh -NoProfile -File .\scripts\rhodium-zero-payload-ultimo.ps1
