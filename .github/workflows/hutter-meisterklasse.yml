@@ -1,0 +1,248 @@
+name: Hutter Meisterklasse 32 Transform Search
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/hutter-meisterklasse.yml"
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  ELITE_SEED: "1034"
+  ELITE_LIMIT: "4520"
+  ENWIK9_SHA1: 2996e86fb978f93cca8f566cc56998923e7fe581
+
+jobs:
+  screen:
+    name: transform-mask-\${{ matrix.mask }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        mask: [0,1,2,4,8,16,32,64,3,5,9,17,33,65,6,10,18,34,66,12,20,36,68,24,40,72,48,80,96,31,63,127]
+
+    steps:
+      - name: Build one reversible transform candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl unzip gnupg lsb-release software-properties-common time
+
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i "s/^SEED=\"923\"$/SEED=\"$ELITE_SEED\"/" build_and_construct_comp.sh
+          sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$ELITE_LIMIT\"/" build_and_construct_comp.sh
+
+          MASK="\${{ matrix.mask }}" python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          mask = int(os.environ["MASK"])
+          tags = ["reg", "sup2", "sup3", "euro", "isin", "rarr", "minus"]
+          path = Path("src/readalike_prepr/phda9_preprocess.h")
+          lines = path.read_text().splitlines(True)
+          changed = {t: 0 for t in tags}
+
+          out = []
+          for line in lines:
+              new = line
+              for bit, tag in enumerate(tags):
+                  if not (mask & (1 << bit)):
+                      continue
+                  if f"//'{tag}'" in line and line.lstrip().startswith("//if"):
+                      indent = line[:len(line)-len(line.lstrip())]
+                      body = line.lstrip()[2:]
+                      new = indent + body
+                      changed[tag] += 1
+                      break
+              out.append(new)
+
+          for bit, tag in enumerate(tags):
+              if mask & (1 << bit):
+                  if changed[tag] != 2:
+                      raise SystemExit(f"PAIR_PATCH_FAIL:{tag}:{changed[tag]}")
+
+          path.write_text("".join(out))
+          enabled = [tag for bit, tag in enumerate(tags) if mask & (1 << bit)]
+          print("TRANSFORM_MASK", mask)
+          print("ENABLED_TRANSFORMS", ",".join(enabled) if enabled else "BASELINE")
+          PY
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          test -f run/cmix_orig
+          cp run/cmix_orig run/cmix_size_prefix
+          upx-ucl -d run/cmix_size_prefix >/dev/null 2>&1
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_size_prefix
+          upx-ucl --best --lzma run/cmix_size_prefix >/dev/null 2>&1
+          cat run/cmix_size_prefix run/comp_dict run/comp_order run/comp_tfweights run/header.dat > run/cmix_meister
+          chmod +x run/cmix_meister
+
+          COMP_BYTES="$(stat -c%s run/cmix_meister)"
+
+          wget -q https://mattmahoney.net/dc/enwik9.zip -O /tmp/enwik9.zip
+          unzip -q /tmp/enwik9.zip -d /tmp/enwik9-dir
+          test "$(stat -c%s /tmp/enwik9-dir/enwik9)" = "1000000000"
+          test "$(sha1sum /tmp/enwik9-dir/enwik9 | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          cd run
+          /usr/bin/time -f "%e" -o /tmp/ppmd.seconds \
+            ./cmix_meister -e /tmp/enwik9-dir/enwik9 /tmp/enwik9.ppmd --ppmd-only \
+            >/tmp/ppmd.log 2>&1
+          cd ..
+
+          PPMD_BYTES="$(stat -c%s /tmp/enwik9.ppmd)"
+          TOTAL_BYTES="$((COMP_BYTES + PPMD_BYTES))"
+          PPMD_SECONDS="$(cat /tmp/ppmd.seconds)"
+
+          MASK="\${{ matrix.mask }}" \
+          COMP_BYTES="$COMP_BYTES" \
+          PPMD_BYTES="$PPMD_BYTES" \
+          TOTAL_BYTES="$TOTAL_BYTES" \
+          PPMD_SECONDS="$PPMD_SECONDS" \
+          python3 - <<'PY'
+          import json, os
+          mask = int(os.environ["MASK"])
+          tags = ["reg", "sup2", "sup3", "euro", "isin", "rarr", "minus"]
+          enabled = [tag for bit, tag in enumerate(tags) if mask & (1 << bit)]
+          row = {
+              "mask": mask,
+              "enabled_transforms": enabled,
+              "seed": 1034,
+              "update_limit": 4520,
+              "compressor_bytes": int(os.environ["COMP_BYTES"]),
+              "ppmd_screen_bytes": int(os.environ["PPMD_BYTES"]),
+              "screen_total_bytes": int(os.environ["TOTAL_BYTES"]),
+              "ppmd_seconds": float(os.environ["PPMD_SECONDS"]),
+              "screen_input": "official enwik9",
+              "screen_mode": "full-enwik9 PPMD-only proxy",
+              "paired_reversible_source_mutation": True,
+              "official_hutter_score": False
+          }
+          open("meister-candidate.json","w").write(json.dumps(row,sort_keys=True)+"\n")
+          print(json.dumps(row,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meister-candidate-\${{ matrix.mask }}
+          path: fx2/meister-candidate.json
+          if-no-files-found: error
+          retention-days: 7
+
+  select:
+    name: Byte-budget P0 gate
+    needs: screen
+    if: always()
+    runs-on: ubuntu-22.04
+    outputs:
+      winner_mask: \${{ steps.pick.outputs.winner_mask }}
+      promote: \${{ steps.pick.outputs.promote }}
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: meister-candidate-*
+          path: results
+          merge-multiple: true
+
+      - id: pick
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob, json
+
+          rows=[]
+          for p in glob.glob("results/*.json"):
+              try:
+                  rows.append(json.load(open(p)))
+              except Exception:
+                  pass
+
+          if not rows:
+              raise SystemExit("NO_VALID_TRANSFORM_CANDIDATES")
+
+          base = next((x for x in rows if x["mask"] == 0), None)
+          if base is None:
+              raise SystemExit("BASELINE_MASK_0_MISSING")
+
+          rows.sort(key=lambda x:(x["screen_total_bytes"], x["compressor_bytes"], x["mask"]))
+          best = rows[0]
+          gain = base["screen_total_bytes"] - best["screen_total_bytes"]
+          promote = gain > 0 and best["mask"] != 0
+
+          result = {
+              "verified_candidates": len(rows),
+              "baseline": base,
+              "best": best,
+              "byte_budget_gain_vs_baseline": gain,
+              "p0_gate": "PASS" if promote else "NO_IMPROVEMENT",
+              "selection_metric": "SCREEN_TOTAL_BYTES_ONLY",
+              "screen_is_official_hutter_score": False,
+              "next_step": "FULL_OFFICIAL_ENWIK9_REQUIRED" if promote else "STOP_NO_BYTE_GAIN"
+          }
+          open("hutter-meisterklasse-result.json","w").write(json.dumps(result,indent=2,sort_keys=True)+"\n")
+          print("winner_mask="+str(best["mask"]))
+          print("promote="+("true" if promote else "false"))
+          print(json.dumps(result,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-meisterklasse-result
+          path: hutter-meisterklasse-result.json
+          retention-days: 7
+
+  package-winner:
+    name: Prepare official winner recipe
+    needs: select
+    if: needs.select.outputs.promote == 'true'
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Emit exact winner recipe
+        shell: bash
+        env:
+          WINNER_MASK: \${{ needs.select.outputs.winner_mask }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          mask=int(os.environ["WINNER_MASK"])
+          tags=["reg","sup2","sup3","euro","isin","rarr","minus"]
+          enabled=[tag for bit,tag in enumerate(tags) if mask & (1<<bit)]
+          out={
+            "upstream_commit":"83f2603f3f7751da5f429fd32669807eb8510494",
+            "seed":1034,
+            "update_limit":4520,
+            "transform_mask":mask,
+            "enabled_transforms":enabled,
+            "selection":"P0 byte-budget winner on official enwik9 PPMD proxy",
+            "official_record_claim":False,
+            "required_final_test":"Build exact candidate, run ./cmix -e enwik9 enwik9.comp, measure compressor + archive9, run archive9, verify SHA1 and resource limits."
+          }
+          open("meister-winner-recipe.json","w").write(json.dumps(out,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meister-winner-recipe
+          path: meister-winner-recipe.json
+          retention-days: 7
