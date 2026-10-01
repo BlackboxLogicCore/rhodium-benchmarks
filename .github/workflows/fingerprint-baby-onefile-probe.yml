@@ -1,0 +1,341 @@
+name: Fingerprint Baby One-File Probe
+
+on:
+  push:
+    paths:
+      - ".github/workflows/fingerprint-baby-onefile-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  SEED: "1031"
+  UPDATE_LIMIT: "4400"
+
+jobs:
+  build-fingerprint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    outputs:
+      source_sha256: ${{ steps.meta.outputs.source_sha256 }}
+      source_bytes: ${{ steps.meta.outputs.source_bytes }}
+      fingerprint_bytes: ${{ steps.meta.outputs.fingerprint_bytes }}
+      segments: ${{ steps.meta.outputs.segments }}
+
+    steps:
+      - name: Build best measured self-learning decoder
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make gcc gnupg lsb-release software-properties-common
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i "s/^SEED=\"923\"$/SEED=\"$SEED\"/" build_and_construct_comp.sh
+          sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$UPDATE_LIMIT\"/" build_and_construct_comp.sh
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          # cmix_orig is the executable model/decoder only. The separately
+          # appended dictionary/order/transformer-weight bundle in run/cmix
+          # is deliberately NOT part of this probe package.
+          test -x run/cmix_orig
+          cp run/cmix_orig /tmp/baby_decoder
+          chmod +x /tmp/baby_decoder
+          echo "DECODER_BYTES=$(stat -c%s /tmp/baby_decoder)"
+
+      - name: Build one-file self-extracting fingerprint candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp fx2/prof_input/input /tmp/source.bin
+          SOURCE_BYTES="$(stat -c%s /tmp/source.bin)"
+          SOURCE_SHA256="$(sha256sum /tmp/source.bin | awk '{print $1}')"
+          echo "$SOURCE_SHA256" > /tmp/source.sha256
+
+          cat > /tmp/baby.c <<'C'
+          #define _GNU_SOURCE
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/stat.h>
+          #include <sys/types.h>
+          #include <sys/wait.h>
+          #include <unistd.h>
+
+          #define MAXSEG 8
+          #define MAGIC 0x52484f4449554d42ULL
+
+          struct __attribute__((packed)) Footer {
+            uint64_t magic;
+            uint64_t decoder_size;
+            uint64_t nseg;
+            uint64_t comp_size[MAXSEG];
+            uint64_t raw_size[MAXSEG];
+          };
+
+          static void die(const char *m) { perror(m); exit(111); }
+
+          static void copy_n(int in, off_t off, const char *path, uint64_t n, mode_t mode) {
+            int out=open(path,O_WRONLY|O_CREAT|O_TRUNC,mode);
+            if(out<0) die("open output");
+            if(lseek(in,off,SEEK_SET)<0) die("lseek");
+            char b[65536];
+            while(n){
+              size_t want=n<sizeof(b)?(size_t)n:sizeof(b);
+              ssize_t r=read(in,b,want);
+              if(r<=0) die("read self");
+              char *p=b; ssize_t left=r;
+              while(left){
+                ssize_t w=write(out,p,(size_t)left);
+                if(w<=0) die("write");
+                p+=w; left-=w;
+              }
+              n-=(uint64_t)r;
+            }
+            close(out);
+          }
+
+          static void cat_file(int out,const char *path,uint64_t expected){
+            int in=open(path,O_RDONLY); if(in<0) die("open part");
+            struct stat st; if(fstat(in,&st)<0) die("stat part");
+            if((uint64_t)st.st_size!=expected){fprintf(stderr,"size mismatch\n");exit(112);}
+            char b[65536]; ssize_t r;
+            while((r=read(in,b,sizeof(b)))>0){
+              char *p=b; ssize_t left=r;
+              while(left){ssize_t w=write(out,p,(size_t)left); if(w<=0) die("write final"); p+=w; left-=w;}
+            }
+            if(r<0) die("read part");
+            close(in);
+          }
+
+          int main(int argc,char **argv){
+            const char *target=(argc>1)?argv[1]:"restored.bin";
+            int self=open("/proc/self/exe",O_RDONLY); if(self<0) die("open self");
+            struct stat st; if(fstat(self,&st)<0) die("stat self");
+            if(st.st_size<(off_t)sizeof(struct Footer)){fprintf(stderr,"short fingerprint\n");return 113;}
+
+            struct Footer f;
+            if(lseek(self,st.st_size-(off_t)sizeof(f),SEEK_SET)<0) die("seek footer");
+            if(read(self,&f,sizeof(f))!=(ssize_t)sizeof(f)) die("read footer");
+            if(f.magic!=MAGIC || f.nseg<1 || f.nseg>MAXSEG){fprintf(stderr,"bad fingerprint footer\n");return 114;}
+
+            uint64_t blobs=f.decoder_size;
+            for(uint64_t i=0;i<f.nseg;i++) blobs+=f.comp_size[i];
+            off_t stub=st.st_size-(off_t)sizeof(f)-(off_t)blobs;
+            if(stub<=0){fprintf(stderr,"bad offsets\n");return 115;}
+
+            char root[128];
+            snprintf(root,sizeof(root),".fingerprint-%ld",(long)getpid());
+            if(mkdir(root,0700)<0) die("mkdir root");
+
+            char dec[192];
+            snprintf(dec,sizeof(dec),"%s/decoder",root);
+            copy_n(self,stub,dec,f.decoder_size,0700);
+
+            off_t pos=stub+(off_t)f.decoder_size;
+            pid_t pids[MAXSEG]={0};
+
+            for(uint64_t i=0;i<f.nseg;i++){
+              char dir[192], pay[224];
+              snprintf(dir,sizeof(dir),"%s/w%llu",root,(unsigned long long)i);
+              if(mkdir(dir,0700)<0) die("mkdir worker");
+              snprintf(pay,sizeof(pay),"%s/payload",dir);
+              copy_n(self,pos,pay,f.comp_size[i],0600);
+              pos+=(off_t)f.comp_size[i];
+
+              pid_t p=fork();
+              if(p<0) die("fork");
+              if(p==0){
+                char localdec[224], localpay[224], localout[224];
+                snprintf(localdec,sizeof(localdec),"%s/decoder",dir);
+                snprintf(localpay,sizeof(localpay),"%s/payload",dir);
+                snprintf(localout,sizeof(localout),"%s/out",dir);
+                if(link(dec,localdec)<0) {
+                  copy_n(self,stub,localdec,f.decoder_size,0700);
+                }
+                execl(localdec,localdec,"-d",localpay,localout,(char*)NULL);
+                _exit(120);
+              }
+              pids[i]=p;
+            }
+
+            close(self);
+            for(uint64_t i=0;i<f.nseg;i++){
+              int status=0;
+              if(waitpid(pids[i],&status,0)<0) die("waitpid");
+              if(!WIFEXITED(status)||WEXITSTATUS(status)!=0){fprintf(stderr,"worker failed\n");return 121;}
+            }
+
+            int out=open(target,O_WRONLY|O_CREAT|O_TRUNC,0600); if(out<0) die("open target");
+            for(uint64_t i=0;i<f.nseg;i++){
+              char dir[192], outp[224];
+              snprintf(dir,sizeof(dir),"%s/w%llu",root,(unsigned long long)i);
+              snprintf(outp,sizeof(outp),"%s/out",dir);
+              cat_file(out,outp,f.raw_size[i]);
+            }
+            close(out);
+
+            for(uint64_t i=0;i<f.nseg;i++){
+              char dir[192], p[224];
+              snprintf(dir,sizeof(dir),"%s/w%llu",root,(unsigned long long)i);
+              snprintf(p,sizeof(p),"%s/payload",dir); unlink(p);
+              snprintf(p,sizeof(p),"%s/out",dir); unlink(p);
+              snprintf(p,sizeof(p),"%s/decoder",dir); unlink(p);
+              rmdir(dir);
+            }
+            unlink(dec);
+            rmdir(root);
+            return 0;
+          }
+          C
+
+          gcc -Os -s -fno-ident -ffunction-sections -fdata-sections               -Wl,--gc-sections /tmp/baby.c -o /tmp/baby_stub
+
+          rm -rf /tmp/candidates
+          mkdir -p /tmp/candidates
+
+          for N in 1 2 4 8; do
+            rm -rf "/tmp/work-$N"
+            mkdir -p "/tmp/work-$N"
+
+            python3 - "$N" <<'PY'
+          import pathlib,sys
+          n=int(sys.argv[1])
+          data=pathlib.Path("/tmp/source.bin").read_bytes()
+          q,r=divmod(len(data),n)
+          p=0
+          for i in range(n):
+              z=q+(1 if i<r else 0)
+              pathlib.Path(f"/tmp/work-{n}/raw-{i}").write_bytes(data[p:p+z])
+              p+=z
+          PY
+
+            for ((i=0;i<N;i++)); do
+              /tmp/baby_decoder -c "/tmp/work-$N/raw-$i" "/tmp/work-$N/comp-$i" >/dev/null 2>&1
+            done
+
+            cp /tmp/baby_stub "/tmp/candidates/fingerprint-$N"
+            cat /tmp/baby_decoder >> "/tmp/candidates/fingerprint-$N"
+            for ((i=0;i<N;i++)); do
+              cat "/tmp/work-$N/comp-$i" >> "/tmp/candidates/fingerprint-$N"
+            done
+
+            python3 - "$N" "/tmp/candidates/fingerprint-$N" <<'PY'
+          import pathlib,struct,sys
+          n=int(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          magic=0x52484f4449554d42
+          dec=pathlib.Path("/tmp/baby_decoder").stat().st_size
+          comps=[pathlib.Path(f"/tmp/work-{n}/comp-{i}").stat().st_size for i in range(n)]
+          raws=[pathlib.Path(f"/tmp/work-{n}/raw-{i}").stat().st_size for i in range(n)]
+          comps += [0]*(8-len(comps)); raws += [0]*(8-len(raws))
+          with out.open("ab") as f:
+              f.write(struct.pack("<QQQ8Q8Q",magic,dec,n,*comps,*raws))
+          out.chmod(0o700)
+          PY
+
+            mkdir -p "/tmp/verify-$N"
+            (
+              cd "/tmp/verify-$N"
+              "/tmp/candidates/fingerprint-$N" restored.bin
+            )
+            test "$(sha256sum "/tmp/verify-$N/restored.bin" | awk '{print $1}')" = "$SOURCE_SHA256"
+            echo "$N $(stat -c%s "/tmp/candidates/fingerprint-$N")" >> /tmp/candidate-sizes.txt
+          done
+
+          sort -k2,2n /tmp/candidate-sizes.txt
+          BEST_N="$(sort -k2,2n /tmp/candidate-sizes.txt | head -1 | awk '{print $1}')"
+          cp "/tmp/candidates/fingerprint-$BEST_N" /tmp/fingerprint
+          chmod +x /tmp/fingerprint
+
+          echo "$BEST_N" > /tmp/best.n
+          echo "PRODUCER_PROBE=PASS"
+          echo "SOURCE_BYTES=$SOURCE_BYTES"
+          echo "SOURCE_SHA256=$SOURCE_SHA256"
+          echo "BEST_SEGMENTS=$BEST_N"
+          echo "FINGERPRINT_BYTES=$(stat -c%s /tmp/fingerprint)"
+
+      - id: meta
+        name: Publish probe metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_sha256=$(cat /tmp/source.sha256)" >> "$GITHUB_OUTPUT"
+          echo "source_bytes=$(stat -c%s /tmp/source.bin)" >> "$GITHUB_OUTPUT"
+          echo "fingerprint_bytes=$(stat -c%s /tmp/fingerprint)" >> "$GITHUB_OUTPUT"
+          echo "segments=$(cat /tmp/best.n)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: one-fingerprint-only
+          path: /tmp/fingerprint
+          if-no-files-found: error
+          retention-days: 7
+
+  naked-receiver:
+    needs: build-fingerprint
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Receive exactly one fingerprint file
+        uses: actions/download-artifact@v4
+        with:
+          name: one-fingerprint-only
+          path: receive
+
+      - name: Self-expand fingerprint on clean receiver
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.build-fingerprint.outputs.source_sha256 }}
+          EXPECTED_BYTES: ${{ needs.build-fingerprint.outputs.source_bytes }}
+          EXPECTED_FINGERPRINT_BYTES: ${{ needs.build-fingerprint.outputs.fingerprint_bytes }}
+          EXPECTED_SEGMENTS: ${{ needs.build-fingerprint.outputs.segments }}
+        run: |
+          set -euo pipefail
+
+          test "$(find receive -maxdepth 1 -type f | wc -l)" -eq 1
+          test -f receive/fingerprint
+          test "$(stat -c%s receive/fingerprint)" = "$EXPECTED_FINGERPRINT_BYTES"
+          chmod +x receive/fingerprint
+
+          mkdir clean
+          cp receive/fingerprint clean/fingerprint
+          rm -rf receive
+
+          test "$(find clean -maxdepth 1 -type f | wc -l)" -eq 1
+
+          START="$(date +%s%N)"
+          (
+            cd clean
+            ./fingerprint restored.bin
+          )
+          END="$(date +%s%N)"
+
+          test "$(stat -c%s clean/restored.bin)" = "$EXPECTED_BYTES"
+          ACTUAL_SHA256="$(sha256sum clean/restored.bin | awk '{print $1}')"
+          test "$ACTUAL_SHA256" = "$EXPECTED_SHA256"
+
+          RESTORE_MS="$(( (END-START)/1000000 ))"
+
+          echo "STATUS=PASS_ONE_FINGERPRINT_COLD_PROBE"
+          echo "TRANSFER_FILES=1"
+          echo "FINGERPRINT_BYTES=$EXPECTED_FINGERPRINT_BYTES"
+          echo "SELF_SPAWNED_RECEIVER_WORKERS=$EXPECTED_SEGMENTS"
+          echo "RESTORE_BYTES=$EXPECTED_BYTES"
+          echo "RESTORE_SHA256=$ACTUAL_SHA256"
+          echo "BIT_IDENTICAL=PASS"
+          echo "RESTORE_MS=$RESTORE_MS"
