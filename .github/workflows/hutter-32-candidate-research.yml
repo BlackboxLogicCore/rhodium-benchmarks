@@ -81,28 +81,10 @@ jobs:
           DST_HASH=$(sha256sum /tmp/candidate/restored | awk '{print $1}')
           test "$SRC_HASH" = "$DST_HASH"
 
-          COMP_BYTES=$(stat -c%s run/cmix)
-          ARCHIVE_BYTES=$(stat -c%s /tmp/candidate/archive)
-          SCORE=$((COMP_BYTES+ARCHIVE_BYTES))
-
-          python3 - <<'PY'
-          import json, os
-          row = {
-              "id": int("${{ matrix.id }}"),
-              "seed": int("${{ matrix.seed }}"),
-              "update_limit": int("${{ matrix.limit }}"),
-              "compressor_bytes": int(os.environ["COMP_BYTES"]),
-              "sample_archive_bytes": int(os.environ["ARCHIVE_BYTES"]),
-              "sample_total_bytes": int(os.environ["SCORE"]),
-              "roundtrip": "PASS",
-          }
-          open("candidate.json","w").write(json.dumps(row, sort_keys=True)+"\n")
-          print(json.dumps(row, indent=2))
-          PY
-        env:
-          COMP_BYTES: ${{ env.COMP_BYTES }}
-          ARCHIVE_BYTES: ${{ env.ARCHIVE_BYTES }}
-          SCORE: ${{ env.SCORE }}
+          echo "ROUNDTRIP=PASS"
+          echo "CANDIDATE_ID=${{ matrix.id }}"
+          echo "SEED=${{ matrix.seed }}"
+          echo "UPDATE_LIMIT=${{ matrix.limit }}"
 
       - name: Recalculate result file
         shell: bash
