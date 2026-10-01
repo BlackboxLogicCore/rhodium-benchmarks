@@ -12,7 +12,7 @@ permissions:
 env:
   UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
   ENWIK9_SHA1: 2996e86fb978f93cca8f566cc56998923e7fe581
-  TARGET_BYTES: "99420425"
+  RECORD_BYTES: "100424672"\n  TARGET_BYTES: "99420425"
 
 jobs:
   search:
@@ -213,6 +213,7 @@ jobs:
 
           ./build_and_construct_comp.sh >/tmp/build.log 2>&1
           test "$(stat -c%s run/comp_tfweights)" = "0"
+          stat -c%s run/cmix > /tmp/compressor.bytes
 
       - name: Fresh download official enwik9 once
         shell: bash
@@ -229,6 +230,7 @@ jobs:
 
           test "$(stat -c%s /tmp/online-cold/source/enwik9)" = "1000000000"
           test "$(sha1sum /tmp/online-cold/source/enwik9 | awk '{print $1}')" = "$ENWIK9_SHA1"
+          sha256sum /tmp/online-cold/source/enwik9 | awk '{print $1}' > /tmp/online-cold/source.sha256
 
           echo "FRESH_ENWIK9=PASS"
 
@@ -243,7 +245,8 @@ jobs:
 
           (
             cd /tmp/online-cold/encode
-            /usr/bin/time -f "%e" -o /tmp/online-cold/csec               ./cmix -e enwik9 enwik9.comp >/tmp/online-cold/c.log 2>&1
+            CPU="$(taskset -pc $ | sed 's/.*: //' | cut -d',' -f1 | cut -d'-' -f1)"
+            /usr/bin/time -f "%e" -o /tmp/online-cold/csec               taskset -c "$CPU" ./cmix -e enwik9 enwik9.comp >/tmp/online-cold/c.log 2>&1
             test -f archive9
           )
 
@@ -269,14 +272,18 @@ jobs:
 
           (
             cd /tmp/online-cold/restore
-            /usr/bin/time -f "%e" -o /tmp/online-cold/dsec               ./archive9 >/tmp/online-cold/d.log 2>&1
+            CPU="$(taskset -pc $ | sed 's/.*: //' | cut -d',' -f1 | cut -d'-' -f1)"
+            /usr/bin/time -f "%e" -o /tmp/online-cold/dsec               taskset -c "$CPU" ./archive9 >/tmp/online-cold/d.log 2>&1
           )
 
           test -f /tmp/online-cold/restore/enwik9_uncompressed
           test "$(stat -c%s /tmp/online-cold/restore/enwik9_uncompressed)" = "1000000000"
           test "$(sha1sum /tmp/online-cold/restore/enwik9_uncompressed | awk '{print $1}')" = "$ENWIK9_SHA1"
+          test "$(sha256sum /tmp/online-cold/restore/enwik9_uncompressed | awk '{print $1}')" = "$(cat /tmp/online-cold/source.sha256)"
 
-          SCORE="$(cat /tmp/online-cold/score)"
+          ARCHIVE="$(cat /tmp/online-cold/score)"
+          COMPRESSOR="$(cat /tmp/compressor.bytes)"
+          SCORE="$((ARCHIVE+COMPRESSOR))"
           CSEC="$(cat /tmp/online-cold/csec)"
           DSEC="$(cat /tmp/online-cold/dsec)"
 
@@ -285,7 +292,10 @@ jobs:
           import json
 
           score=int("$SCORE")
+          archive=int("$ARCHIVE")
+          compressor=int("$COMPRESSOR")
           target=int("$TARGET_BYTES")
+          record=int("$RECORD_BYTES")
 
           out={
             "status":"PASS_COLD_ONLINE_MODEL_STANDALONE",
@@ -299,12 +309,16 @@ jobs:
             "source_sha1":"$ENWIK9_SHA1",
             "winner_seed":int("$WIN_SEED"),
             "winner_update_limit":int("$WIN_LIMIT"),
-            "archive9_bytes":score,
+            "compressor_bytes":compressor,
+            "archive9_bytes":archive,
+            "total_score_bytes":score,
+            "current_record_bytes":record,
+            "beats_current_record":score < record,
             "compress_seconds":float("$CSEC"),
             "decompress_seconds":float("$DSEC"),
             "bit_identical":True,
             "target_bytes":target,
-            "target_reached":score <= target
+            "target_reached":score < target
           }
 
           open("evidence/hutter-online-cold-final.json","w").write(
