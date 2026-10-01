@@ -213,6 +213,7 @@ jobs:
 
           ./build_and_construct_comp.sh >/tmp/build.log 2>&1
           test "$(stat -c%s run/comp_tfweights)" = "0"
+          echo "FIXED_MODEL_WEIGHT_BYTES=0"
           stat -c%s run/cmix > /tmp/compressor.bytes
 
       - name: Fresh download official enwik9 exactly once
