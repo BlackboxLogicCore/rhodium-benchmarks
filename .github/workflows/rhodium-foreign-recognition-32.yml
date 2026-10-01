@@ -1,0 +1,78 @@
+name: Rhodium Foreign Recognition 32
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rhodium-foreign-recognition-32.yml"
+      - "scripts/rhodium_foreign_remote_test.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rhodium-foreign-recognition-32
+  cancel-in-progress: false
+
+jobs:
+  foreign-recognition:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recover unchanged Rhodium runtime
+        env:
+          RH_ENGINE: ${{ secrets.RHODIUM_ENWIK9_ENGINE_GZ_B64 || secrets.RG_ENGINE_GZ_B64 }}
+          RH_HARNESS: ${{ secrets.RHODIUM_ENWIK9_HARNESS_GZ_B64 || secrets.RG_HARNESS_GZ_B64 }}
+          RH_ADAPTER: ${{ secrets.RHODIUM_ENWIK9_ADAPTER_GZ_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import base64, gzip, hashlib, os
+          from pathlib import Path
+          from scripts.enwik9_remote_test import EXPECTED_RUNTIME
+
+          root = Path("private-runtime")
+          root.mkdir(exist_ok=False)
+
+          for variable, name in [
+              ("RH_ENGINE", "matrix_live.py"),
+              ("RH_HARNESS", "matrix_blackbox.py"),
+              ("RH_ADAPTER", "adapter.py"),
+          ]:
+              encoded = os.environ.get(variable, "").lstrip("\ufeff")
+              if not encoded:
+                  raise SystemExit("RUNTIME_PACKAGE_MISSING")
+              raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+              if hashlib.sha256(raw).hexdigest() != EXPECTED_RUNTIME[name]:
+                  raise SystemExit("RUNTIME_HASH_MISMATCH")
+              target = root / name
+              target.write_bytes(raw)
+              target.chmod(0o400)
+
+          print("RUNTIME_UNCHANGED=PASS")
+          PY
+
+      - name: Download foreign Internet data and run one shared fingerprint path
+        shell: bash
+        run: python3 scripts/rhodium_foreign_remote_test.py
+
+      - name: Remove private runtime and source
+        if: always()
+        shell: bash
+        run: rm -rf private-runtime private-work-foreign
+
+      - name: Upload result only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rhodium-foreign-recognition-32-${{ github.run_id }}
+          path: evidence/foreign-recognition-32-result.json
+          if-no-files-found: ignore
+          retention-days: 7
