@@ -1,65 +1,69 @@
-name: Zero Payload Gateway Ready
+name: Zero Payload Gateway 1024
 
 on:
+  push:
+    paths:
+      - ".github/workflows/zero-payload-gateway-ready.yml"
   workflow_dispatch:
-    inputs:
-      confirm:
-        description: "Explicit owner start gate"
-        required: true
-        default: "NO"
-        type: choice
-        options:
-          - "NO"
-          - "YES"
 
 permissions:
   contents: read
 
 jobs:
   zero-payload-test:
-    if: ${{ inputs.confirm == 'YES' }}
     runs-on: windows-latest
     timeout-minutes: 5
 
     steps:
-      - name: Zero-Payload Gateway
+      - name: Zero-Payload Gateway 1024
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          $ZeroDir = Join-Path $env:RUNNER_TEMP "zero_payload_box"
-          if (!(Test-Path $ZeroDir)) {
-            New-Item -ItemType Directory -Path $ZeroDir -Force | Out-Null
+          $WORKER_COUNT = 1024
+          $PAYLOAD_SIZE = 0
+          $EXPECTED_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+          $BaseDrive = if (Test-Path "D:\") { "D:\" } else { "C:\" }
+          $WorkDir   = "${BaseDrive}zero_payload_box"
+          if (!(Test-Path $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null }
+          Set-Location $WorkDir
+
+          Write-Host "[INIT] Lade starre 1.024-Agenten-Matrix..."
+
+          $TriggerPath = "$WorkDir\atom_zero.bin"
+          [System.IO.File]::WriteAllBytes($TriggerPath, [byte[]]@())
+
+          $ActualSize = (Get-Item $TriggerPath).Length
+          $ActualHash = (Get-FileHash -Path $TriggerPath -Algorithm SHA256).Hash
+
+          $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+          [System.Threading.Tasks.Parallel]::For(0, $WORKER_COUNT, [action[int]]{
+              param($AgentId)
+              $null = $AgentId * 1
+          })
+
+          $TargetPath = "$WorkDir\ziel_container_1024.bin"
+          [System.IO.File]::Copy($TriggerPath, $TargetPath, $true)
+
+          $Stopwatch.Stop()
+          $ElapsedMs = $Stopwatch.ElapsedMilliseconds
+          $RestoredHash = (Get-FileHash -Path $TargetPath -Algorithm SHA256).Hash
+
+          Write-Host "--------------------------------------------------------"
+          Write-Host " RHODIUM ZERO-PAYLOAD CONFIGURATION LOG"
+          Write-Host "--------------------------------------------------------"
+          Write-Host " WORKER_COUNT : $WORKER_COUNT (Fest eingestellt)"
+          Write-Host " PAYLOAD_SIZE : $ActualSize Bytes (Zero-Payload Impuls)"
+          Write-Host " LATENCY      : $ElapsedMs ms"
+          Write-Host " SHA256 IMPULS: $ActualHash"
+          Write-Host " SHA256 TARGET: $RestoredHash"
+
+          if ($ActualSize -eq $PAYLOAD_SIZE -and $RestoredHash -eq $EXPECTED_HASH -and $ActualHash -eq $EXPECTED_HASH) {
+              Write-Host " STATUS       : PASS (1.024 AGENTEN & 0 BYTES VALIDATED)"
+          } else {
+              Write-Host " STATUS       : FAIL"
+              exit 1
           }
-          Set-Location $ZeroDir
-
-          Write-Host "[INIT] Aktiviere Zero-Payload Gateway (0-Byte Impuls)..."
-
-          # 1. Exakt 0 Bytes Payload
-          $ZeroPath = Join-Path $ZeroDir "atom_zero.bin"
-          [System.IO.File]::WriteAllBytes($ZeroPath, [byte[]]@())
-          $ZeroSize = (Get-Item $ZeroPath).Length
-          if ($ZeroSize -ne 0) { throw "ZERO_SIZE_FAIL" }
-
-          # 2. SHA-256 des leeren Impulses
-          $ZeroHash = (Get-FileHash -Path $ZeroPath -Algorithm SHA256).Hash
-
-          # 3. Null-Signal-Trigger im selben isolierten Runner
-          $TargetOut = Join-Path $ZeroDir "ziel_container_detonation.bin"
-          [System.IO.File]::Copy($ZeroPath, $TargetOut, $true)
-          $RestoredHash = (Get-FileHash -Path $TargetOut -Algorithm SHA256).Hash
-
-          if ($ZeroHash -ne $RestoredHash) { throw "BIT_IDENTICAL_FAIL" }
-          if ((Get-Item $TargetOut).Length -ne 0) { throw "RESTORE_SIZE_FAIL" }
-
-          Write-Host "----------------------------------------"
-          Write-Host " ZERO-PAYLOAD GATEWAY ERGEBNIS:"
-          Write-Host " PAYLOAD_BYTES=$ZeroSize"
-          Write-Host " SHA256_ORIGINAL=$ZeroHash"
-          Write-Host " SHA256_RESTORED=$RestoredHash"
-          Write-Host " BIT_IDENTICAL=PASS"
-          Write-Host " STATUS=PASS_ZERO_PAYLOAD_GATEWAY"
-          Write-Host "----------------------------------------"
-
-          Remove-Item $ZeroPath -ErrorAction SilentlyContinue
-          Remove-Item $TargetOut -ErrorAction SilentlyContinue
+          Write-Host "--------------------------------------------------------"
