@@ -1,0 +1,169 @@
+name: Hutter Elite Inheritance Research
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hutter-elite-inheritance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generation:
+    name: elite-${{ matrix.seed }}-${{ matrix.limit }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 32
+      matrix:
+        seed: [1031, 1033, 1039, 1049]
+        limit: [3400, 3600, 3800, 4000, 4200, 4400, 4600, 4800]
+
+    steps:
+      - name: Build inherited isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl gnupg lsb-release software-properties-common time
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout 83f2603f3f7751da5f429fd32669807eb8510494
+
+          sed -i 's/^SEED="923"$/SEED="${{ matrix.seed }}"/' build_and_construct_comp.sh
+          sed -i 's/^UPDATE_LIMIT="3000"$/UPDATE_LIMIT="${{ matrix.limit }}"/' build_and_construct_comp.sh
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          mkdir -p /tmp/candidate
+          cp prof_input/input /tmp/candidate/input
+
+          /usr/bin/time -f "%e" -o /tmp/compress.seconds \
+            ./run/cmix -c /tmp/candidate/input /tmp/candidate/archive >/tmp/compress.log 2>&1
+
+          /usr/bin/time -f "%e" -o /tmp/decompress.seconds \
+            ./run/cmix -d /tmp/candidate/archive /tmp/candidate/restored >/tmp/decompress.log 2>&1
+
+          SRC_HASH=$(sha256sum /tmp/candidate/input | awk '{print $1}')
+          DST_HASH=$(sha256sum /tmp/candidate/restored | awk '{print $1}')
+          test "$SRC_HASH" = "$DST_HASH"
+
+          COMP_BYTES=$(stat -c%s run/cmix)
+          ARCHIVE_BYTES=$(stat -c%s /tmp/candidate/archive)
+          TOTAL_BYTES=$((COMP_BYTES+ARCHIVE_BYTES))
+          COMPRESS_SECONDS=$(cat /tmp/compress.seconds)
+          DECOMPRESS_SECONDS=$(cat /tmp/decompress.seconds)
+
+          python3 - <<PY
+          import json
+          row = {
+            "seed": ${{ matrix.seed }},
+            "update_limit": ${{ matrix.limit }},
+            "compressor_bytes": $COMP_BYTES,
+            "sample_archive_bytes": $ARCHIVE_BYTES,
+            "sample_total_bytes": $TOTAL_BYTES,
+            "compress_seconds": float("$COMPRESS_SECONDS"),
+            "decompress_seconds": float("$DECOMPRESS_SECONDS"),
+            "roundtrip": "PASS",
+            "inherited_from": {"seed": 1031, "update_limit": 3400},
+            "box_changed": False
+          }
+          open("candidate-${{ matrix.seed }}-${{ matrix.limit }}.json","w").write(
+              json.dumps(row, sort_keys=True)+"\n"
+          )
+          print(json.dumps(row, indent=2, sort_keys=True))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: elite-candidate-${{ matrix.seed }}-${{ matrix.limit }}
+          path: fx2/candidate-${{ matrix.seed }}-${{ matrix.limit }}.json
+          retention-days: 7
+
+  select:
+    needs: generation
+    if: always()
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: elite-candidate-*
+          path: results
+          merge-multiple: true
+
+      - name: Build guarded elite ledger and Pareto frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, json, os
+
+          rows=[]
+          for p in glob.glob("results/*.json"):
+              try:
+                  x=json.load(open(p))
+                  if x.get("roundtrip")=="PASS":
+                      rows.append(x)
+              except Exception:
+                  pass
+
+          if not rows:
+              raise SystemExit("NO_VERIFIED_CANDIDATES")
+
+          def dominates(a,b):
+              av=(a["sample_total_bytes"],a["compress_seconds"],a["decompress_seconds"])
+              bv=(b["sample_total_bytes"],b["compress_seconds"],b["decompress_seconds"])
+              return all(x<=y for x,y in zip(av,bv)) and any(x<y for x,y in zip(av,bv))
+
+          frontier=[]
+          for x in rows:
+              if not any(dominates(y,x) for y in rows if y is not x):
+                  frontier.append(x)
+
+          rows.sort(key=lambda x:(
+              x["sample_total_bytes"],
+              x["compress_seconds"]+x["decompress_seconds"],
+              x["compressor_bytes"],
+              x["seed"],
+              x["update_limit"]
+          ))
+          frontier.sort(key=lambda x:(
+              x["sample_total_bytes"],
+              x["compress_seconds"]+x["decompress_seconds"]
+          ))
+
+          elite=rows[0]
+          ledger={
+            "verified_candidates":len(rows),
+            "elite":elite,
+            "pareto_frontier":frontier,
+            "inheritance_mode":"guarded-generation",
+            "promotion_rule":"roundtrip PASS + Pareto/byte budget; no production mutation",
+            "note":"Research only. Full official enwik9 single-core validation is still required."
+          }
+
+          open("elite-ledger.json","w").write(json.dumps(ledger,indent=2,sort_keys=True)+"\n")
+          print(json.dumps(ledger,indent=2,sort_keys=True))
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as f:
+              f.write("## Guarded elite inheritance\n\n")
+              f.write(f"Verified candidates: {len(rows)}\n\n")
+              f.write(f"Elite seed={elite['seed']} limit={elite['update_limit']}\n\n")
+              f.write(f"Elite sample total={elite['sample_total_bytes']} bytes\n\n")
+              f.write(f"Pareto frontier size={len(frontier)}\n")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hutter-elite-ledger
+          path: elite-ledger.json
+          retention-days: 7
