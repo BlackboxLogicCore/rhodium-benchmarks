@@ -29,6 +29,10 @@ jobs:
     if: ${{ inputs.confirm == 'YES' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 10
+    outputs:
+      source_sha256: ${{ steps.meta.outputs.source_sha256 }}
+      source_bytes: ${{ steps.meta.outputs.source_bytes }}
+      workers: ${{ steps.meta.outputs.workers }}
 
     steps:
       - name: Produce deterministic source and raw seed payload
@@ -45,16 +49,14 @@ jobs:
           if n not in (8,16,42):
               raise SystemExit("INVALID_PAYLOAD_BYTES")
 
-          # Fixed raw seed bytes only. No wrapper/header/decoder in payload.
+          # Raw seed only: no wrapper, no header, no decoder in payload.
           base = hashlib.sha256(b"RHODIUM_ATOMIC_SEED_V1").digest()
           seed = (base * ((n + len(base) - 1)//len(base)))[:n]
           pathlib.Path("/tmp/atom.bin").write_bytes(seed)
           if pathlib.Path("/tmp/atom.bin").stat().st_size != n:
               raise SystemExit("PAYLOAD_SIZE_MISMATCH")
 
-          # Deterministic target-side expansion function. This is deliberately
-          # external to the payload and therefore must be accounted as
-          # preinstalled decoder/state in any benchmark that requires it.
+          # Target-side expansion logic is external to the payload.
           total = 1024 * 1024
           workers = min(8, os.cpu_count() or 2)
           chunks = workers
@@ -85,29 +87,20 @@ jobs:
           print("PRODUCER=PASS")
           PY
 
-      - name: Transfer raw seed only
+      - name: Publish verifier outputs
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_sha256=$(cat /tmp/source.sha256)" >> "$GITHUB_OUTPUT"
+          echo "source_bytes=$(cat /tmp/source.bytes)" >> "$GITHUB_OUTPUT"
+          echo "workers=$(cat /tmp/workers)" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer exactly one raw seed file
         uses: actions/upload-artifact@v4
         with:
           name: atom-only
           path: /tmp/atom.bin
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish verification metadata
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            echo "SOURCE_SHA256=$(cat /tmp/source.sha256)"
-            echo "SOURCE_BYTES=$(cat /tmp/source.bytes)"
-            echo "WORKERS=$(cat /tmp/workers)"
-          } > /tmp/meta.env
-
-      - name: Upload verifier metadata separately
-        uses: actions/upload-artifact@v4
-        with:
-          name: verifier-metadata
-          path: /tmp/meta.env
           if-no-files-found: error
           retention-days: 1
 
@@ -118,25 +111,21 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Receive raw seed only
+      - name: Receive exactly one raw seed file
         uses: actions/download-artifact@v4
         with:
           name: atom-only
           path: inbound
 
-      - name: Receive external verification metadata
-        uses: actions/download-artifact@v4
-        with:
-          name: verifier-metadata
-          path: verify
-
       - name: Expand seed with target-side parallel workers and verify
         shell: bash
         env:
           PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
+          SOURCE_SHA256: ${{ needs.atomic-live.outputs.source_sha256 }}
+          SOURCE_BYTES: ${{ needs.atomic-live.outputs.source_bytes }}
+          WORKERS: ${{ needs.atomic-live.outputs.workers }}
         run: |
           set -euo pipefail
-          source verify/meta.env
 
           test "$(find inbound -maxdepth 1 -type f | wc -l)" -eq 1
           test -f inbound/atom.bin
