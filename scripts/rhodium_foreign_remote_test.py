@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from scripts.enwik9_remote_test import EXPECTED_RUNTIME
+from enwik9_remote_test import EXPECTED_RUNTIME
 
 SOURCE_URL = "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.tar.xz"
 WORKERS = 32
