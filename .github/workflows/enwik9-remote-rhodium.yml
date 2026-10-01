@@ -46,6 +46,9 @@ jobs:
               ("RH_ADAPTER", "adapter.py"),
           ]:
               encoded = os.environ.get(variable, "")
+              # Windows text transport may prepend one UTF-8 byte-order mark.
+              if encoded.startswith("\ufeff"):
+                  encoded = encoded[1:]
               if not encoded:
                   raise SystemExit("RUNTIME_PACKAGE_MISSING")
               raw = gzip.decompress(base64.b64decode(encoded, validate=True))
