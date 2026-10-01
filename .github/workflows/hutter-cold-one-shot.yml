@@ -1,0 +1,159 @@
+name: Hutter Cold One-Shot Fresh
+
+on:
+  push:
+    paths:
+      - ".github/workflows/hutter-cold-one-shot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_COMMIT: 83f2603f3f7751da5f429fd32669807eb8510494
+  ENWIK9_SHA1: 2996e86fb978f93cca8f566cc56998923e7fe581
+  ELITE_SEED: "1031"
+  ELITE_LIMIT: "4000"
+  TARGET_BYTES: "99420425"
+
+jobs:
+  cold-one-shot:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Build selected standalone candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq upx-ucl make curl unzip gnupg lsb-release software-properties-common time
+
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 17 >/dev/null
+          rm llvm.sh
+
+          git clone --filter=blob:none https://github.com/astOwOlfo/fx2-cmix-transformer-v1.git fx2
+          cd fx2
+          git checkout "$UPSTREAM_COMMIT"
+
+          sed -i "s/^SEED=\"923\"$/SEED=\"$ELITE_SEED\"/" build_and_construct_comp.sh
+          sed -i "s/^UPDATE_LIMIT=\"3000\"$/UPDATE_LIMIT=\"$ELITE_LIMIT\"/" build_and_construct_comp.sh
+
+          ./build_and_construct_comp.sh >/tmp/build.log 2>&1
+
+          cp run/cmix_orig run/cmix_cold
+          upx-ucl -d run/cmix_cold >/dev/null 2>&1
+          STRIP_BIN="$(command -v llvm-strip-17 || command -v llvm-strip || command -v strip)"
+          "$STRIP_BIN" --strip-all run/cmix_cold
+          upx-ucl --best --lzma run/cmix_cold >/dev/null 2>&1
+
+          cat             run/cmix_cold             run/comp_dict             run/comp_order             run/comp_tfweights             run/header.dat             > run/cmix_candidate
+
+          chmod +x run/cmix_candidate
+          echo "CANDIDATE_BYTES=$(stat -c%s run/cmix_candidate)"
+
+      - name: Fresh download of official enwik9
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf /tmp/enwik9-cold
+          mkdir -p /tmp/enwik9-cold/source /tmp/enwik9-cold/encode /tmp/enwik9-cold/restore
+
+          curl --fail --location --retry 3             --connect-timeout 20 --max-time 900             --silent --show-error             https://mattmahoney.net/dc/enwik9.zip             --output /tmp/enwik9-cold/enwik9.zip
+
+          unzip -q /tmp/enwik9-cold/enwik9.zip -d /tmp/enwik9-cold/source
+          rm /tmp/enwik9-cold/enwik9.zip
+
+          test "$(stat -c%s /tmp/enwik9-cold/source/enwik9)" = "1000000000"
+          test "$(sha1sum /tmp/enwik9-cold/source/enwik9 | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          echo "FRESH_SOURCE=PASS"
+          echo "SOURCE_BYTES=1000000000"
+          echo "SOURCE_SHA1=$ENWIK9_SHA1"
+
+      - name: One-shot cold encode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp fx2/run/cmix_candidate /tmp/enwik9-cold/encode/cmix
+          cp /tmp/enwik9-cold/source/enwik9 /tmp/enwik9-cold/encode/enwik9
+          chmod +x /tmp/enwik9-cold/encode/cmix
+
+          (
+            cd /tmp/enwik9-cold/encode
+            /usr/bin/time -f "%e" -o /tmp/enwik9-cold/compress.seconds               ./cmix -e enwik9 enwik9.comp >/tmp/enwik9-cold/compress.log 2>&1
+            test -f archive9
+          )
+
+          stat -c%s /tmp/enwik9-cold/encode/archive9 > /tmp/enwik9-cold/archive9.bytes
+
+          # Remove every source/build copy from the restore side. The decoder test
+          # below receives only archive9.
+          cp /tmp/enwik9-cold/encode/archive9 /tmp/enwik9-cold/restore/archive9
+          chmod +x /tmp/enwik9-cold/restore/archive9
+          rm -rf /tmp/enwik9-cold/source /tmp/enwik9-cold/encode
+          rm -rf fx2
+
+          echo "COLD_PACKAGE_ONLY=PASS"
+
+      - name: Restore on naked directory using only archive9
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(find /tmp/enwik9-cold/restore -maxdepth 1 -type f | wc -l)" -eq 1
+          test -f /tmp/enwik9-cold/restore/archive9
+
+          (
+            cd /tmp/enwik9-cold/restore
+            /usr/bin/time -f "%e" -o /tmp/enwik9-cold/decompress.seconds               ./archive9 >/tmp/enwik9-cold/decompress.log 2>&1
+          )
+
+          test -f /tmp/enwik9-cold/restore/enwik9_uncompressed
+          test "$(stat -c%s /tmp/enwik9-cold/restore/enwik9_uncompressed)" = "1000000000"
+          test "$(sha1sum /tmp/enwik9-cold/restore/enwik9_uncompressed | awk '{print $1}')" = "$ENWIK9_SHA1"
+
+          SCORE="$(cat /tmp/enwik9-cold/archive9.bytes)"
+          CSEC="$(cat /tmp/enwik9-cold/compress.seconds)"
+          DSEC="$(cat /tmp/enwik9-cold/decompress.seconds)"
+
+          mkdir -p evidence
+          python3 - <<PY
+          import json
+          score=int("$SCORE")
+          target=int("$TARGET_BYTES")
+          out={
+              "status":"PASS_COLD_STANDALONE_ROUNDTRIP",
+              "fresh_download":True,
+              "preexisting_receiver_state":False,
+              "restore_input_files":["archive9"],
+              "source_bytes":1000000000,
+              "source_sha1":"$ENWIK9_SHA1",
+              "seed":int("$ELITE_SEED"),
+              "update_limit":int("$ELITE_LIMIT"),
+              "archive9_bytes":score,
+              "compress_seconds":float("$CSEC"),
+              "decompress_seconds":float("$DSEC"),
+              "bit_identical":True,
+              "target_bytes":target,
+              "target_reached":score <= target
+          }
+          open("evidence/hutter-cold-one-shot.json","w").write(
+              json.dumps(out,indent=2,sort_keys=True)+"\n"
+          )
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - name: Upload cold proof only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hutter-cold-one-shot-${{ github.run_id }}
+          path: evidence/hutter-cold-one-shot.json
+          if-no-files-found: ignore
+          retention-days: 7
