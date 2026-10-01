@@ -1,0 +1,209 @@
+name: Fingerprint Pure One-File Probe
+
+on:
+  push:
+    paths:
+      - ".github/workflows/fingerprint-pure-onefile-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  producer:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      source_sha256: ${{ steps.meta.outputs.source_sha256 }}
+      source_bytes: ${{ steps.meta.outputs.source_bytes }}
+      fingerprint_bytes: ${{ steps.meta.outputs.fingerprint_bytes }}
+      candidate: ${{ steps.meta.outputs.candidate }}
+      chunks: ${{ steps.meta.outputs.chunks }}
+      producer_ms: ${{ steps.meta.outputs.producer_ms }}
+
+    steps:
+      - name: Build one fingerprint from one local package
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          START_NS="$(date +%s%N)"
+
+          python3 - <<'PY'
+          import base64, concurrent.futures, hashlib, os, pathlib, textwrap, time, zlib
+
+          # One local test package. No checkout. No network. No external model.
+          block = (
+              b"RHODIUM-FINGERPRINT-PROBE|"
+              + bytes(range(256))
+              + b"|ONE-FILE|SELF-RESTORE|"
+          )
+          source = (block * ((1024 * 1024 // len(block)) + 1))[:1024 * 1024]
+          pathlib.Path("/tmp/source.bin").write_bytes(source)
+
+          source_sha = hashlib.sha256(source).hexdigest()
+          pathlib.Path("/tmp/source.sha256").write_text(source_sha)
+          pathlib.Path("/tmp/source.bytes").write_text(str(len(source)))
+
+          # 32 producer candidates = 8 chunk layouts x 4 compression levels.
+          configs = [(chunks, level)
+                     for chunks in (2, 4, 8, 16, 32, 64, 128, 256)
+                     for level in (3, 6, 8, 9)]
+
+          def split_bytes(data, n):
+              q, r = divmod(len(data), n)
+              out = []
+              p = 0
+              for i in range(n):
+                  z = q + (1 if i < r else 0)
+                  out.append(data[p:p+z])
+                  p += z
+              return out
+
+          def build_candidate(cfg):
+              chunks, level = cfg
+              parts = split_bytes(source, chunks)
+              packed = [zlib.compress(p, level) for p in parts]
+              encoded = [base64.b85encode(p).decode("ascii") for p in packed]
+
+              # Everything needed for reconstruction is in this ONE file.
+              # SHA verification stays outside the fingerprint and is not used
+              # for reconstruction.
+              script = """#!/usr/bin/env python3
+          import base64,concurrent.futures,os,sys,zlib
+          P={payload!r}
+          def d(x):
+              return zlib.decompress(base64.b85decode(x.encode("ascii")))
+          if __name__=="__main__":
+              w=max(2,min(len(P),os.cpu_count() or 2,8))
+              with concurrent.futures.ProcessPoolExecutor(max_workers=w) as e:
+                  parts=list(e.map(d,P))
+              open(sys.argv[1] if len(sys.argv)>1 else "restored.bin","wb").write(b"".join(parts))
+          """.format(payload=encoded)
+
+              b = script.encode("utf-8")
+              return {
+                  "chunks": chunks,
+                  "level": level,
+                  "bytes": len(b),
+                  "content": b,
+              }
+
+          t0 = time.perf_counter_ns()
+          max_workers = min(32, os.cpu_count() or 2)
+          with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+              results = list(ex.map(build_candidate, configs))
+          search_ms = (time.perf_counter_ns() - t0) // 1_000_000
+
+          # Smallest one-file fingerprint wins. If tied, fewer chunks wins.
+          best = min(results, key=lambda x: (x["bytes"], x["chunks"], -x["level"]))
+          fp = pathlib.Path("/tmp/fingerprint")
+          fp.write_bytes(best["content"])
+          fp.chmod(0o700)
+
+          # Producer-side proof before transfer.
+          out = pathlib.Path("/tmp/local-restored.bin")
+          rc = os.system(f"/tmp/fingerprint {out} >/dev/null 2>&1")
+          if rc != 0:
+              raise SystemExit("LOCAL_FINGERPRINT_EXEC_FAILED")
+          restored = out.read_bytes()
+          if restored != source:
+              raise SystemExit("LOCAL_BIT_IDENTICAL_FAILED")
+
+          pathlib.Path("/tmp/fingerprint.bytes").write_text(str(fp.stat().st_size))
+          pathlib.Path("/tmp/best.candidate").write_text(f"chunks={best['chunks']},level={best['level']}")
+          pathlib.Path("/tmp/best.chunks").write_text(str(best["chunks"]))
+          pathlib.Path("/tmp/search.ms").write_text(str(search_ms))
+
+          print("PRODUCER=PASS")
+          print("CANDIDATES=32")
+          print(f"PRODUCER_PARALLELISM={max_workers}")
+          print(f"BEST_CHUNKS={best['chunks']}")
+          print(f"BEST_LEVEL={best['level']}")
+          print(f"FINGERPRINT_BYTES={fp.stat().st_size}")
+          print(f"SEARCH_MS={search_ms}")
+          print("LOCAL_BIT_IDENTICAL=PASS")
+          PY
+
+          END_NS="$(date +%s%N)"
+          TOTAL_MS="$(( (END_NS-START_NS)/1000000 ))"
+          echo "$TOTAL_MS" > /tmp/producer.ms
+          echo "PRODUCER_TOTAL_MS=$TOTAL_MS"
+
+      - name: Publish producer metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "source_sha256=$(cat /tmp/source.sha256)" >> "$GITHUB_OUTPUT"
+          echo "source_bytes=$(cat /tmp/source.bytes)" >> "$GITHUB_OUTPUT"
+          echo "fingerprint_bytes=$(cat /tmp/fingerprint.bytes)" >> "$GITHUB_OUTPUT"
+          echo "candidate=$(cat /tmp/best.candidate)" >> "$GITHUB_OUTPUT"
+          echo "chunks=$(cat /tmp/best.chunks)" >> "$GITHUB_OUTPUT"
+          echo "producer_ms=$(cat /tmp/producer.ms)" >> "$GITHUB_OUTPUT"
+
+      - name: Transfer exactly one fingerprint
+        uses: actions/upload-artifact@v4
+        with:
+          name: fingerprint-only
+          path: /tmp/fingerprint
+          if-no-files-found: error
+          retention-days: 1
+
+  receiver:
+    needs: producer
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Receive exactly one fingerprint
+        uses: actions/download-artifact@v4
+        with:
+          name: fingerprint-only
+          path: inbound
+
+      - name: Restore from the fingerprint only
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.producer.outputs.source_sha256 }}
+          EXPECTED_BYTES: ${{ needs.producer.outputs.source_bytes }}
+          EXPECTED_FP_BYTES: ${{ needs.producer.outputs.fingerprint_bytes }}
+          EXPECTED_CHUNKS: ${{ needs.producer.outputs.chunks }}
+          CANDIDATE: ${{ needs.producer.outputs.candidate }}
+        run: |
+          set -euo pipefail
+
+          test "$(find inbound -maxdepth 1 -type f | wc -l)" -eq 1
+          test -f inbound/fingerprint
+          test "$(stat -c%s inbound/fingerprint)" = "$EXPECTED_FP_BYTES"
+
+          mkdir clean
+          mv inbound/fingerprint clean/fingerprint
+          rmdir inbound
+          chmod +x clean/fingerprint
+
+          # Before restore there is exactly one file on the receiver.
+          test "$(find clean -maxdepth 1 -type f | wc -l)" -eq 1
+
+          START_NS="$(date +%s%N)"
+          (
+            cd clean
+            ./fingerprint restored.bin
+          )
+          END_NS="$(date +%s%N)"
+          RESTORE_MS="$(( (END_NS-START_NS)/1000000 ))"
+
+          test "$(stat -c%s clean/restored.bin)" = "$EXPECTED_BYTES"
+          ACTUAL_SHA256="$(sha256sum clean/restored.bin | awk '{print $1}')"
+          test "$ACTUAL_SHA256" = "$EXPECTED_SHA256"
+
+          echo "STATUS=PASS_ONE_FINGERPRINT"
+          echo "TRANSFERRED_FILES=1"
+          echo "CANDIDATE=$CANDIDATE"
+          echo "FINGERPRINT_BYTES=$EXPECTED_FP_BYTES"
+          echo "FINGERPRINT_CHUNKS=$EXPECTED_CHUNKS"
+          echo "RESTORE_BYTES=$EXPECTED_BYTES"
+          echo "RESTORE_SHA256=$ACTUAL_SHA256"
+          echo "BIT_IDENTICAL=PASS"
+          echo "RESTORE_MS=$RESTORE_MS"
