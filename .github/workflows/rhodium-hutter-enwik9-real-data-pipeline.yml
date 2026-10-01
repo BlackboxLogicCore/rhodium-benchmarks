@@ -1,0 +1,24 @@
+name: Rhodium Hutter enwik9 Real Data Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/rhodium-hutter-enwik9-real-data-pipeline.ps1'
+      - '.github/workflows/rhodium-hutter-enwik9-real-data-pipeline.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run-real-enwik9:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run exact provided PowerShell pipeline
+        shell: pwsh
+        run: pwsh -NoProfile -File .\scripts\rhodium-hutter-enwik9-real-data-pipeline.ps1
