@@ -1,0 +1,69 @@
+MOTHERBOX_RUN_REQUEST=ACTIVE
+TASK=BABY_AGENT_P0_MINIMAL_TRANSFER
+MODE=ISOLATED_SCRATCH
+P0=MANDATORY
+BASELINE_MUTATION=FORBIDDEN
+PRODUCTION_MUTATION=FORBIDDEN
+PROMOTION=FORBIDDEN
+
+MISSION:
+Create internally one minimal self-contained baby agent for this transfer task.
+The baby agent must be able to:
+1. absorb only the information actually needed for the assigned source object;
+2. carry its own reconstruction method inside the same transfer object;
+3. enter a naked receiver without any package-specific preloaded state;
+4. create any temporary restore workers locally after arrival;
+5. restore the source bit-identically.
+
+HARD TRANSFER RULE:
+Exactly one package-specific object may cross from A to B.
+No separate decoder.
+No separate model.
+No separate key file.
+No separate manifest.
+No separate dictionary.
+No hidden cache.
+No hidden download.
+No source object present in B.
+No duplicated reconstruction information.
+
+ACCOUNTING:
+Count every byte of the single object that crosses the A->B boundary.
+Locally generated workers in B do not count as additional transfer bytes, but they may use only:
+- the frozen neutral receiver baseline, and
+- information contained in the one transferred object.
+
+OPTIMIZATION:
+1. BIT_IDENTICAL=PASS is mandatory.
+2. SOURCE_SHA256=RESTORED_SHA256 is mandatory.
+3. Minimize TOTAL_TRANSFER_BYTES.
+4. Then minimize TOTAL_MS.
+5. Search internally across candidate baby-agent designs and keep only the smallest valid measured candidate.
+6. Do not force ZIP, zstd, cmix, fingerprint, worker count, decoder format, or any predefined architecture.
+7. Do not claim a mathematical minimum unless proved.
+
+P0_NO_REGRESSION:
+Do not alter MotherBox baseline.
+Do not alter ProductionBox.
+Run only in disposable scratch.
+A failed candidate is discarded, never promoted.
+
+REQUIRED_EVIDENCE:
+SOURCE_BYTES=
+SOURCE_SHA256=
+TARGET_BASELINE=
+CANDIDATES_TESTED=
+BEST_METHOD=
+TRANSFER_OBJECT_FILES=1
+TOTAL_TRANSFER_BYTES=
+TRANSFER_OBJECT_SHA256=
+RESTORE_WORKERS_CREATED_LOCALLY=
+RESTORED_BYTES=
+RESTORED_SHA256=
+BIT_IDENTICAL=
+NO_HIDDEN_SIDE_INFORMATION=
+P0=
+TOTAL_MS=
+STATUS=
+
+REQUEST=CREATE_TEST_AND_REPORT_SMALLEST_VALID_RESULT
