@@ -1,69 +1,89 @@
 MOTHERBOX_RUN_REQUEST=ACTIVE
-TASK=BABY_AGENT_P0_MINIMAL_TRANSFER
+TASK=ENWIK9_EXACT_ONE_BYTE_MAMA_TRANSFER
 MODE=ISOLATED_SCRATCH
+SOURCE=OFFICIAL_ENWIK9
+SOURCE_BYTES=1000000000
 P0=MANDATORY
 BASELINE_MUTATION=FORBIDDEN
 PRODUCTION_MUTATION=FORBIDDEN
 PROMOTION=FORBIDDEN
 
 MISSION:
-Create internally one minimal self-contained baby agent for this transfer task.
-The baby agent must be able to:
-1. absorb only the information actually needed for the assigned source object;
-2. carry its own reconstruction method inside the same transfer object;
-3. enter a naked receiver without any package-specific preloaded state;
-4. create any temporary restore workers locally after arrival;
-5. restore the source bit-identically.
+Execute exactly this path and no fallback path.
+
+A-SIDE:
+1. MamaBox itself enters source container A.
+2. The existing enwik9 package is the assigned package.
+3. MamaBox creates logical temporary workers for the package. If the environment can support the full requested fan-out for the package work, use up to 1000000 logical workers; otherwise use the maximum safe parallel logical fan-out available without changing the stable MamaBox.
+4. The workers reduce the package to one internal package recognition/state key.
+5. Temporary workers disappear after the package key has been produced.
+6. MamaBox creates/holds exactly the three internal recognition states required by the requested design:
+   A = package key/state
+   B = recognition/order key/state required for the exact restore task
+   C = MamaBox self-state/key
+7. MamaBox transforms A+B+C into exactly ONE shared fingerprint.
 
 HARD TRANSFER RULE:
-Exactly one package-specific object may cross from A to B.
+TRANSFER_FILES=1
+FINGERPRINT_BYTES=1
+Exactly one byte crosses from A to B as the package-specific transfer object.
+No second transfer object.
+No separate key file.
 No separate decoder.
 No separate model.
-No separate key file.
 No separate manifest.
 No separate dictionary.
-No hidden cache.
-No hidden download.
-No source object present in B.
-No duplicated reconstruction information.
+No extra metadata stream.
+No hidden package-specific cache/download/state on B.
+Do not fall back to a representation larger than one byte.
 
-ACCOUNTING:
-Count every byte of the single object that crosses the A->B boundary.
-Locally generated workers in B do not count as additional transfer bytes, but they may use only:
-- the frozen neutral receiver baseline, and
-- information contained in the one transferred object.
+B-SIDE:
+1. Receiver B starts cold and without the source package.
+2. Only the one-byte fingerprint is transferred to B.
+3. MamaBox must reconstitute its required self-state from that fingerprint under the tested design.
+4. MamaBox must recover the recognition/order state and package state from the same fingerprint.
+5. MamaBox creates restore workers locally. If the environment can support the full requested fan-out, use up to 1000000 logical workers; otherwise use the maximum safe parallel logical fan-out available.
+6. The workers restore the complete original enwik9 package.
+7. Temporary workers disappear after restore.
 
-OPTIMIZATION:
-1. BIT_IDENTICAL=PASS is mandatory.
-2. SOURCE_SHA256=RESTORED_SHA256 is mandatory.
-3. Minimize TOTAL_TRANSFER_BYTES.
-4. Then minimize TOTAL_MS.
-5. Search internally across candidate baby-agent designs and keep only the smallest valid measured candidate.
-6. Do not force ZIP, zstd, cmix, fingerprint, worker count, decoder format, or any predefined architecture.
-7. Do not claim a mathematical minimum unless proved.
+MANDATORY RESULT GATES:
+RESTORED_BYTES=SOURCE_BYTES
+SOURCE_SHA256=RESTORED_SHA256
+BIT_IDENTICAL=PASS
+HASH_MATCH=PASS
+P0=PASS
+TRANSFER_FILES=1
+FINGERPRINT_BYTES=1
 
-P0_NO_REGRESSION:
-Do not alter MotherBox baseline.
-Do not alter ProductionBox.
-Run only in disposable scratch.
-A failed candidate is discarded, never promoted.
+COMPETITION ACCOUNTING:
+Use the official enwik9 object.
+Do not use any uncounted package-specific information or external source during restore.
+Report any executable/program/decoder bytes that the official competition rules require to be counted; do not hide them behind the one-byte transfer metric.
+Do not add duplicate seals or extra validation layers that the task does not require.
+Do not claim Hutter eligibility unless the official size/runtime/resource rules are actually satisfied.
 
-REQUIRED_EVIDENCE:
+NO_FALLBACK:
+If exact one-byte transfer plus exact restore cannot be achieved under these rules, return FAIL for this exact candidate.
+Do not silently substitute 7151 bytes or any other larger transfer size.
+Do not change the stable MamaBox to make the test pass.
+
+OUTPUT_ONLY:
 SOURCE_BYTES=
 SOURCE_SHA256=
-TARGET_BASELINE=
-CANDIDATES_TESTED=
-BEST_METHOD=
-TRANSFER_OBJECT_FILES=1
-TOTAL_TRANSFER_BYTES=
-TRANSFER_OBJECT_SHA256=
-RESTORE_WORKERS_CREATED_LOCALLY=
+FINGERPRINT_BYTES=
+TRANSFER_FILES=
+WORKERS_A=
+WORKERS_B=
+ENCODE_MS=
+TRANSFER_MS=
+RESTORE_MS=
 RESTORED_BYTES=
 RESTORED_SHA256=
 BIT_IDENTICAL=
-NO_HIDDEN_SIDE_INFORMATION=
+HASH_MATCH=
 P0=
-TOTAL_MS=
+COMPETITION_COUNTED_PROGRAM_BYTES=
+COMPETITION_TOTAL_BYTES=
 STATUS=
 
-REQUEST=CREATE_TEST_AND_REPORT_SMALLEST_VALID_RESULT
+REQUEST=EXECUTE_EXACT_TEST_AND_REPORT_REAL_MEASUREMENTS
