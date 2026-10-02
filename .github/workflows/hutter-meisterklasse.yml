@@ -151,13 +151,21 @@ jobs:
           if not rows:
               raise SystemExit("NO_FAST_SCREEN_PASS")
           rows.sort(key=lambda x:(x["sample_total_bytes"],x["compress_seconds"]+x["decompress_seconds"],x["mask"]))
-          picked=rows[:5]
+          base=next((x for x in rows if x["mask"]==0),None)
+          if base is None:
+              raise SystemExit("P0_BASELINE_MASK0_MISSING")
+          eligible=[x for x in rows if x["sample_total_bytes"] <= base["sample_total_bytes"]]
+          eligible.sort(key=lambda x:(x["sample_total_bytes"],x["compress_seconds"]+x["decompress_seconds"],x["mask"]))
+          picked=eligible[:5]
           if not any(x["mask"]==0 for x in picked):
-              base=next((x for x in rows if x["mask"]==0),None)
-              if base is not None:
-                  picked=picked[:4]+[base]
+              picked=picked[:4]+[base]
           print("matrix="+json.dumps({"include":[{"mask":x["mask"]} for x in picked]},separators=(",",":")))
-          open("shortlist.json","w").write(json.dumps({"verified":len(rows),"picked":picked},indent=2)+"\n")
+          open("shortlist.json","w").write(json.dumps({
+              "verified":len(rows),
+              "p0_baseline":base,
+              "p0_eligible":len(eligible),
+              "picked":picked
+          },indent=2)+"\n")
           PY
 
       - uses: actions/upload-artifact@v4
@@ -286,10 +294,21 @@ jobs:
               try: rows.append(json.load(open(p)))
               except Exception: pass
           if not rows: raise SystemExit("NO_FULL_PROXY_PASS")
-          rows.sort(key=lambda x:(x["proxy_total_bytes"],x["proxy_seconds"],x["mask"]))
-          best=rows[0]
+          base=next((x for x in rows if x["mask"]==0),None)
+          if base is None:
+              raise SystemExit("P0_FULL_BASELINE_MASK0_MISSING")
+          eligible=[x for x in rows if x["proxy_total_bytes"] <= base["proxy_total_bytes"]]
+          if not eligible:
+              raise SystemExit("P0_NO_NONWORSE_FULL_PROXY")
+          eligible.sort(key=lambda x:(x["proxy_total_bytes"],x["proxy_seconds"],x["mask"]))
+          best=eligible[0]
           print("mask="+str(best["mask"]))
-          open("proxy-winner.json","w").write(json.dumps({"best":best,"verified":len(rows)},indent=2)+"\n")
+          open("proxy-winner.json","w").write(json.dumps({
+              "best":best,
+              "verified":len(rows),
+              "p0_baseline":base,
+              "p0_eligible":len(eligible)
+          },indent=2)+"\n")
           PY
 
       - uses: actions/upload-artifact@v4
